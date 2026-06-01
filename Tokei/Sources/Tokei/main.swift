@@ -24,8 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var timer: Timer?
 
     // 菜单栏家族品牌色(与面板 Theme.claude/codex 一致)。
-    static let claudeColor = NSColor(red: 0.97, green: 0.57, blue: 0.31, alpha: 1)
-    static let codexColor  = NSColor(red: 0.23, green: 0.76, blue: 0.66, alpha: 1)
+    static let claudeColor = NSColor(red: 0.92, green: 0.52, blue: 0.40, alpha: 1)
+    static let codexColor  = NSColor(red: 0.42, green: 0.68, blue: 0.98, alpha: 1)
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)

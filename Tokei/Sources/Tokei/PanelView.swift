@@ -72,6 +72,16 @@ struct PanelView: View {
             Text(store.lastUpdated)
                 .font(.system(size: 9.5, design: .monospaced))
                 .foregroundStyle(Theme.tTertiary)
+            Button { settingsOpen.toggle() } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.tTertiary)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(Color.primary.opacity(0.06)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $settingsOpen, arrowEdge: .bottom) { settingsContent }
         }
     }
 
@@ -99,7 +109,6 @@ struct PanelView: View {
             if let q7 = c.q7 {
                 quotaRow(title: "周剩余", pct: 100 - q7, reset: c.q7_reset, tint: Theme.claude)
             }
-            sessionRow(c.session_name, c.session_total)
             disclaimer
         }
     }
@@ -353,26 +362,52 @@ struct PanelView: View {
     var footer: some View {
         HStack(spacing: 4) {
             Spacer()
-            IconButton(icon: "gearshape", label: "设置") { settingsOpen.toggle() }
-                .popover(isPresented: $settingsOpen, arrowEdge: .bottom) { settingsContent }
             IconButton(icon: "arrow.clockwise", label: "刷新") { store.refresh() }
             IconButton(icon: "power", label: "退出") { NSApp.terminate(nil) }
         }
     }
 
     var settingsContent: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text("显示卡片").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.tSecondary)
-            Toggle("Claude Code", isOn: $showClaude)
-            Toggle("Codex", isOn: $showCodex)
-            Toggle("Gemini CLI", isOn: $showGemini)
-            Toggle("Grok CLI", isOn: $showGrok)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.tTertiary)
+                Text("显示卡片")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.tSecondary)
+            }
+            VStack(spacing: 2) {
+                settingsRow("Claude Code", tint: Theme.claude, isOn: $showClaude)
+                settingsRow("Codex", tint: Theme.codex, isOn: $showCodex)
+                settingsRow("Gemini CLI", tint: Theme.gemini, isOn: $showGemini)
+                settingsRow("Grok CLI", tint: Theme.grok, isOn: $showGrok)
+            }
         }
-        .toggleStyle(.switch)
-        .font(.system(size: 11))
-        .padding(12)
-        .frame(width: 170)
+        .padding(14)
+        .frame(width: 200)
         .background(Theme.bg)
         .environment(\.colorScheme, .dark)
+    }
+
+    func settingsRow(_ name: String, tint: Color, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(tint.gradient).frame(width: 6, height: 6)
+                .shadow(color: tint.opacity(0.4), radius: 2)
+            Text(name)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(Theme.tPrimary)
+            Spacer()
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.04))
+        )
     }
 }

@@ -2,30 +2,29 @@ import SwiftUI
 
 // 设计系统:颜色 / 间距 / 圆角集中定义,组件语义化复用。
 enum Theme {
-    static let claude = Color(red: 0.97, green: 0.57, blue: 0.31)
-    static let codex  = Color(red: 0.23, green: 0.76, blue: 0.66)
-    static let gemini = Color(red: 0.26, green: 0.52, blue: 0.96)   // #4285F4
-    static let grok   = Color(red: 0.72, green: 0.74, blue: 0.80)   // 银灰,示意降级
+    static let claude = Color(red: 0.92, green: 0.52, blue: 0.40)   // 柔珊瑚
+    static let codex  = Color(red: 0.42, green: 0.68, blue: 0.98)   // 天青
+    static let gemini = Color(red: 0.62, green: 0.52, blue: 0.92)   // 薰衣草
+    static let grok   = Color(red: 0.65, green: 0.68, blue: 0.75)   // 冷灰银
 
     static let panelWidth: CGFloat = 322
     static let cardRadius: CGFloat = 16
     static let outerPad: CGFloat = 15
 
     static var brand: LinearGradient {
-        LinearGradient(colors: [claude, codex], startPoint: .leading, endPoint: .trailing)
+        LinearGradient(colors: [claude.opacity(0.8), claude],
+                       startPoint: .leading, endPoint: .trailing)
     }
 
-    // 半透明深空灰:偏冷灰、低不透明度,让毛玻璃透出,质感高级。
     static var bg: LinearGradient {
-        LinearGradient(colors: [Color(red: 0.24, green: 0.25, blue: 0.29).opacity(0.55),
-                                Color(red: 0.16, green: 0.17, blue: 0.20).opacity(0.62)],
+        LinearGradient(colors: [Color(red: 0.22, green: 0.23, blue: 0.27).opacity(0.58),
+                                Color(red: 0.14, green: 0.15, blue: 0.18).opacity(0.65)],
                        startPoint: .top, endPoint: .bottom)
     }
 
-    // 语义文字色(暗底,提高可读性)
-    static let tPrimary   = Color.white.opacity(0.96)
-    static let tSecondary = Color.white.opacity(0.76)
-    static let tTertiary  = Color.white.opacity(0.52)
+    static let tPrimary   = Color.white.opacity(0.94)
+    static let tSecondary = Color.white.opacity(0.70)
+    static let tTertiary  = Color.white.opacity(0.45)
 }
 
 // 毛玻璃之上的浮起卡片:淡色填充 + 渐变描边 + 柔和投影。
@@ -38,20 +37,26 @@ struct Card<Content: View>: View {
             .padding(13)
             .background(
                 RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                    .fill(Color.black.opacity(0.28))
+                    .fill(Color.black.opacity(0.26))
                     .overlay(
                         RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                            .fill(tint.opacity(0.13))
+                            .fill(tint.opacity(0.08))
                     )
+                    .overlay(alignment: .top) {
+                        RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                            .fill(LinearGradient(
+                                colors: [Color.white.opacity(0.05), .clear],
+                                startPoint: .top, endPoint: .center))
+                    }
             )
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
                     .strokeBorder(
-                        LinearGradient(colors: [tint.opacity(0.60), tint.opacity(0.12)],
+                        LinearGradient(colors: [tint.opacity(0.38), tint.opacity(0.05)],
                                        startPoint: .topLeading, endPoint: .bottomTrailing),
-                        lineWidth: 1)
+                        lineWidth: 0.75)
             )
-            .shadow(color: Color.black.opacity(0.35), radius: 10, x: 0, y: 5)
+            .shadow(color: Color.black.opacity(0.30), radius: 12, x: 0, y: 6)
     }
 }
 
@@ -67,7 +72,7 @@ struct RingGauge: View {
                 .trim(from: 0, to: max(0.001, min(1, value / 100)))
                 .stroke(tint.gradient, style: StrokeStyle(lineWidth: 4.5, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-                .shadow(color: tint.opacity(0.55), radius: 3)
+                .shadow(color: tint.opacity(0.35), radius: 4)
             VStack(spacing: -1) {
                 Text("\(Int(value.rounded()))")
                     .font(.system(size: size * 0.30, weight: .bold, design: .rounded))
@@ -112,7 +117,7 @@ struct MetricCell: View {
                 .font(.system(size: 9.5, weight: .bold))
                 .foregroundStyle(tint)
                 .frame(width: 21, height: 21)
-                .background(Circle().fill(tint.opacity(0.15)))
+                .background(Circle().fill(tint.opacity(0.10)))
             VStack(alignment: .leading, spacing: 1) {
                 Text(label)
                     .font(.system(size: 9.5))
@@ -135,7 +140,7 @@ struct CostHeadline: View {
         HStack(alignment: .firstTextBaseline, spacing: 7) {
             Text(String(format: "$%.2f", cost))
                 .font(.system(size: 23, weight: .bold, design: .rounded))
-                .foregroundStyle(tint)
+                .foregroundStyle(.white)
                 .contentTransition(.numericText())
             Text(caption)
                 .font(.system(size: 10))
