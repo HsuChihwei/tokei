@@ -11,9 +11,10 @@ struct PanelView: View {
     @AppStorage("showCodex") private var showCodex = true
     @AppStorage("showGemini") private var showGemini = true
     @AppStorage("showGrok") private var showGrok = true
+    @AppStorage("showQoder") private var showQoder = true
 
     private var visibleCount: Int {
-        [showClaude, showCodex, showGemini, showGrok].filter { $0 }.count
+        [showClaude, showCodex, showGemini, showGrok, showQoder].filter { $0 }.count
     }
     private var useWide: Bool { visibleCount > 2 }
     private var panelWidth: CGFloat { useWide ? 640 : Theme.panelWidth }
@@ -33,6 +34,7 @@ struct PanelView: View {
                         VStack(alignment: .leading, spacing: 13) {
                             if showGemini { Card(tint: Theme.gemini) { geminiBlock(u.gemini.ranges.get(sel)) } }
                             if showGrok   { Card(tint: Theme.grok)   { grokBlock(u.grok.ranges.get(sel), model: u.grok.model) } }
+                            if showQoder  { Card(tint: Theme.qoder)  { qoderBlock(u.qoder, u.qoder.ranges.get(sel)) } }
                         }
                         .frame(maxWidth: .infinity)
                     }
@@ -41,6 +43,7 @@ struct PanelView: View {
                     if showCodex  { Card(tint: Theme.codex)  { codexBlock(u.codex, u.codex.ranges.get(sel)) } }
                     if showGemini { Card(tint: Theme.gemini) { geminiBlock(u.gemini.ranges.get(sel)) } }
                     if showGrok   { Card(tint: Theme.grok)   { grokBlock(u.grok.ranges.get(sel), model: u.grok.model) } }
+                    if showQoder  { Card(tint: Theme.qoder)  { qoderBlock(u.qoder, u.qoder.ranges.get(sel)) } }
                 }
             } else {
                 HStack { Spacer(); ProgressView().controlSize(.small); Spacer() }
@@ -205,6 +208,52 @@ struct PanelView: View {
                 }
             }
             Text("仅上下文 token,非消耗量;成本 —")
+                .font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
+        }
+    }
+
+    // MARK: - Qoder 卡片
+    @ViewBuilder
+    func qoderBlock(_ q: QoderStat, _ r: QoderRange) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardHeadPlain("Qoder", tint: Theme.qoder)
+            sessionCountRow(r.sessions, tint: Theme.qoder)
+            metricGrid({
+                var items: [Metric] = [
+                    .init("terminal", "调用", "\(r.calls)"),
+                    .init("clock", "耗时", Fmt.duration(r.duration)),
+                ]
+                if r.ctx > 0 {
+                    items.append(.init("chart.bar.fill", "上下文", String(format: "%.0f%%", r.ctx)))
+                }
+                if r.in > 0 {
+                    items.append(.init("arrow.down", "输入", Fmt.human(r.in)))
+                }
+                return items
+            }(), tint: Theme.qoder)
+            if let quota = q.quota {
+                thinDivider
+                if let uq = quota.userQuota, let rem = uq.remaining, let tot = uq.total {
+                    let pct = tot > 0 ? Double(rem) / Double(tot) * 100 : 0
+                    quotaRow(title: "个人额度", pct: pct, reset: quota.expiresAt.map { $0 / 1000 }, tint: Theme.qoder)
+                }
+                if let org = quota.orgResourcePackage, let rem = org.remaining, let cap = org.cap {
+                    let pct = cap > 0 ? Double(rem) / Double(cap) * 100 : 0
+                    quotaRow(title: "团队额度", pct: pct, reset: nil, tint: Theme.qoder)
+                }
+            }
+            if let model = q.model, !model.isEmpty {
+                HStack {
+                    Text("model").font(.system(size: 11)).foregroundStyle(Theme.tTertiary)
+                    Spacer()
+                    Text(model)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.tSecondary)
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.qoder.opacity(0.16)))
+                }
+            }
+            Text("token 暂不可用;额度来自本地日志")
                 .font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
         }
     }
@@ -382,6 +431,7 @@ struct PanelView: View {
                 settingsRow("Codex", tint: Theme.codex, isOn: $showCodex)
                 settingsRow("Gemini CLI", tint: Theme.gemini, isOn: $showGemini)
                 settingsRow("Grok CLI", tint: Theme.grok, isOn: $showGrok)
+                settingsRow("Qoder", tint: Theme.qoder, isOn: $showQoder)
             }
         }
         .padding(14)

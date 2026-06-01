@@ -21,6 +21,7 @@ CLAUDE_DIR = os.path.join(HOME, ".claude", "projects")
 CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
 GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
 GROK_DIR = os.path.join(HOME, ".grok", "sessions")
+QODER_DIR = os.path.join(HOME, ".qoder")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PRICING_FILE = os.path.join(BASE_DIR, "pricing.json")
@@ -601,6 +602,125 @@ def scan_grok(bounds):
     return {"ranges": B, "model": latest_model}
 
 
+# ---------- Qoder ----------
+# QoderWork SQLite:~/Library/Application Support/QoderWork/data/agents.db
+# messages 表 metadata 含 durationMs / contextUsageRatio(token 字段目前全 0)。
+_QODER_DB = os.path.join(HOME, "Library", "Application Support", "QoderWork", "data", "agents.db")
+
+
+def scan_qoder(bounds, cache):
+    import sqlite3 as _sqlite3
+    fc = cache.setdefault("qoder", {})
+    empty = {k: {"in": 0, "out": 0, "sessions": 0, "calls": 0,
+                 "duration": 0, "ctx_ratio": 0.0}
+             for k in RANGE_KEYS}
+    if not os.path.isfile(_QODER_DB):
+        return {"ranges": empty}
+
+    try:
+        sig = f"{os.path.getmtime(_QODER_DB)}:{os.path.getsize(_QODER_DB)}"
+    except OSError:
+        return {"ranges": empty}
+
+    entry = fc.get("db")
+    if not entry or entry.get("sig") != sig:
+        days = {}
+        try:
+            conn = _sqlite3.connect(f"file:{_QODER_DB}?mode=ro", uri=True)
+            for row in conn.execute("""
+                SELECT date(created_at,'unixepoch','localtime') as day,
+                       COUNT(*) as calls,
+                       COUNT(DISTINCT chat_id) as sessions,
+                       COALESCE(SUM(json_extract(metadata,'$.inputTokens')),0),
+                       COALESCE(SUM(json_extract(metadata,'$.outputTokens')),0),
+                       COALESCE(SUM(json_extract(metadata,'$.durationMs')),0),
+                       COALESCE(AVG(CASE WHEN json_extract(metadata,'$.contextUsageRatio')>0
+                                    THEN json_extract(metadata,'$.contextUsageRatio') END),0)
+                FROM messages WHERE metadata!='{}'
+                GROUP BY day
+            """):
+                dk, calls, sessions, ti, to_, dur, ctx = row
+                if dk:
+                    days[dk] = {"calls": calls, "sessions": sessions,
+                                "in": int(ti or 0), "out": int(to_ or 0),
+                                "duration": int(dur or 0), "ctx_ratio": float(ctx or 0)}
+            conn.close()
+        except Exception:
+            pass
+        fc["db"] = {"sig": sig, "days": days}
+        entry = fc["db"]
+
+    today_d = bounds["today"].date()
+    yest_d = bounds["yesterday"].date()
+    week_d = bounds["week"].date()
+    month_d = bounds["month"].date()
+    year_d = bounds["year"].date()
+
+    B = {k: {"in": 0, "out": 0, "sessions": 0, "calls": 0,
+             "duration": 0, "ctx_sum": 0.0, "ctx_count": 0}
+         for k in RANGE_KEYS}
+
+    for dk, day in entry.get("days", {}).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        ks = []
+        if d == today_d: ks.append("today")
+        if d == yest_d: ks.append("yesterday")
+        if d >= week_d: ks.append("week")
+        if d >= month_d: ks.append("month")
+        if d >= year_d: ks.append("year")
+        for k in ks:
+            b = B[k]
+            b["in"] += day["in"]; b["out"] += day["out"]
+            b["sessions"] += day["sessions"]; b["calls"] += day["calls"]
+            b["duration"] += day["duration"]
+            if day["ctx_ratio"] > 0:
+                b["ctx_sum"] += day["ctx_ratio"] * day["calls"]
+                b["ctx_count"] += day["calls"]
+
+    # 从 QoderWork 日志提取最新 credit 额度
+    quota = None
+    qw_logs = os.path.join(HOME, "Library", "Application Support", "QoderWork", "logs")
+    if os.path.isdir(qw_logs):
+        log_dirs = sorted(glob.glob(os.path.join(qw_logs, "2*")), reverse=True)
+        for ld in log_dirs[:2]:
+            main_log = os.path.join(ld, "main.log")
+            if not os.path.isfile(main_log):
+                continue
+            try:
+                with open(main_log, "r", encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        if '"operation":"usage"' not in line or '"userQuota"' not in line:
+                            continue
+                        m = re.search(r'"data":(\{.*?"isQuotaExceeded":\w+)', line)
+                        if not m:
+                            continue
+                        try:
+                            quota = json.loads(m.group(1) + "}")
+                        except Exception:
+                            pass
+            except OSError:
+                pass
+            if quota:
+                break
+
+    # 当前模型
+    model = None
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect(f"file:{_QODER_DB}?mode=ro", uri=True)
+        row = conn.execute("SELECT value FROM app_settings WHERE key='modelLevel'").fetchone()
+        if row:
+            model = row[0].strip('"')
+        conn.close()
+    except Exception:
+        pass
+
+    return {"ranges": B, "quota": quota, "model": model}
+
+
 def fmt_reset(epoch):
     try:
         return datetime.fromtimestamp(int(epoch)).astimezone().strftime("%m-%d %H:%M")
@@ -700,6 +820,7 @@ def compute():
     cx = scan_codex(bounds, cache)
     gm = scan_gemini(bounds)
     gk = scan_grok(bounds)
+    qd = scan_qoder(bounds, cache)
     _save_scan_cache(cache)
 
     def claude_range(b):
@@ -737,10 +858,16 @@ def compute():
     def grok_range(b):
         return {"tokens": b["tokens"], "sessions": len(b["sessions"])}
 
+    def qoder_range(b):
+        ctx = (b["ctx_sum"] / b["ctx_count"] * 100) if b["ctx_count"] else 0.0
+        return {"in": b["in"], "out": b["out"], "sessions": b["sessions"],
+                "calls": b["calls"], "duration": b["duration"], "ctx": ctx}
+
     cranges = {k: claude_range(cc["ranges"][k]) for k in RANGE_KEYS}
     xranges = {k: codex_range(cx["ranges"][k]) for k in RANGE_KEYS}
     granges = {k: gemini_range(gm["ranges"][k]) for k in RANGE_KEYS}
     kranges = {k: grok_range(gk["ranges"][k]) for k in RANGE_KEYS}
+    qranges = {k: qoder_range(qd["ranges"][k]) for k in RANGE_KEYS}
 
     cur = cc["cur"]
     cur_total = cur["in"] + cur["out"] + cur["cr"] + cur["cw"]
@@ -771,6 +898,11 @@ def compute():
         "grok": {
             "ranges": kranges,
             "model": gk["model"],
+        },
+        "qoder": {
+            "ranges": qranges,
+            "quota": qd.get("quota"),
+            "model": qd.get("model"),
         },
     }
 

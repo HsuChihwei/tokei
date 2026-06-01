@@ -6,6 +6,7 @@ enum Theme {
     static let codex  = Color(red: 0.42, green: 0.68, blue: 0.98)   // 天青
     static let gemini = Color(red: 0.62, green: 0.52, blue: 0.92)   // 薰衣草
     static let grok   = Color(red: 0.65, green: 0.68, blue: 0.75)   // 冷灰银
+    static let qoder  = Color(red: 0.90, green: 0.75, blue: 0.35)   // 琥珀金
 
     static let panelWidth: CGFloat = 322
     static let cardRadius: CGFloat = 16

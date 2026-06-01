@@ -172,11 +172,60 @@ struct GrokStat: Codable {
     var model: String?
 }
 
+struct QoderRange: Codable {
+    var `in`: Int
+    var out: Int
+    var sessions: Int = 0
+    var calls: Int = 0
+    var duration: Int = 0
+    var ctx: Double = 0
+}
+
+struct QoderRanges: Codable {
+    var today: QoderRange
+    var yesterday: QoderRange
+    var week: QoderRange
+    var month: QoderRange
+    var year: QoderRange
+    func get(_ k: RangeKey) -> QoderRange {
+        switch k {
+        case .today: return today
+        case .yesterday: return yesterday
+        case .week: return week
+        case .month: return month
+        case .year: return year
+        }
+    }
+}
+
+struct QoderQuotaBucket: Codable {
+    var total: Int?
+    var used: Int?
+    var remaining: Int?
+    var percentage: Double?
+    var cap: Int?
+    var unit: String?
+}
+
+struct QoderQuota: Codable {
+    var userQuota: QoderQuotaBucket?
+    var orgResourcePackage: QoderQuotaBucket?
+    var totalUsagePercentage: Double?
+    var expiresAt: Int?
+}
+
+struct QoderStat: Codable {
+    var ranges: QoderRanges
+    var quota: QoderQuota?
+    var model: String?
+}
+
 struct Usage: Codable {
     var claude: ClaudeStat
     var codex: CodexStat
     var gemini: GeminiStat
     var grok: GrokStat
+    var qoder: QoderStat
 }
 
 enum Fmt {
@@ -195,6 +244,12 @@ enum Fmt {
         return f.string(from: d)
     }
 
-    // 单价徽章:1.25 → "1.25",5 → "5"(去尾零)。
+    static func duration(_ ms: Int) -> String {
+        let s = ms / 1000
+        if s >= 3600 { return String(format: "%dh%dm", s / 3600, (s % 3600) / 60) }
+        if s >= 60 { return String(format: "%dm%ds", s / 60, s % 60) }
+        return "\(s)s"
+    }
+
     static func price(_ x: Double) -> String { String(format: "%g", x) }
 }
