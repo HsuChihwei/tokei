@@ -5,7 +5,7 @@
 # <bitbar.desc>Claude Code + Codex 本地 token / 缓存命中 / 花费 / 额度</bitbar.desc>
 # <swiftbar.runInBash>false</swiftbar.runInBash>
 #
-# 数据全部读自本地会话日志,不联网、不改动任何 CLI:
+# 数据全部读自本地会话日志,运行/刷新不联网、不改动任何 CLI(仅 --update-prices 显式联网更新价格表):
 #   Claude Code: ~/.claude/projects/<proj>/<session>.jsonl  (assistant 行 message.usage,增量)
 #   Codex:       ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (token_count 事件,含额度)
 
@@ -13,56 +13,164 @@ import os
 import sys
 import glob
 import json
-from datetime import datetime, timedelta
+import re
+from datetime import datetime, timedelta, date
 
 HOME = os.path.expanduser("~")
 CLAUDE_DIR = os.path.join(HOME, ".claude", "projects")
 CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
+GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
+GROK_DIR = os.path.join(HOME, ".grok", "sessions")
 
-# 每 1M token 美元单价。价格会变,按需自行核对。
-# write5m / write1h = 5 分钟 / 1 小时 缓存写入价。
-PRICING = {
-    "opus":   {"in": 5.0,  "out": 25.0, "cache_read": 0.5,  "write5m": 6.25,  "write1h": 10.0},
-    "sonnet": {"in": 3.0,  "out": 15.0, "cache_read": 0.3,  "write5m": 3.75,  "write1h": 6.0},
-    "haiku":  {"in": 1.0,  "out": 5.0,  "cache_read": 0.1,  "write5m": 1.25,  "write1h": 2.0},
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PRICING_FILE = os.path.join(BASE_DIR, "pricing.json")
+OVERRIDES_FILE = os.path.join(BASE_DIR, "pricing_overrides.json")
+
+# 每 1M token 美元单价。基准价来自 OpenRouter,外置在 pricing.json(由 --update-prices 同步);
+# pricing_overrides.json 做本地修正(write1h / 别名 / 缺漏),一键更新不覆盖它。
+# write5m / write1h = 5 分钟 / 1 小时 缓存写入价(OpenRouter 只给一档 cache_write=5m,
+# Anthropic 的 1h 写派生为 2×输入价)。
+
+# 内置兜底:pricing.json 缺失时仍能离线工作(口径与 OpenRouter 一致)。
+_DEFAULT_PRICES = {
+    "anthropic/claude-opus-4.8":     {"in": 5.0,   "out": 25.0, "cache_read": 0.5,    "cache_write": 6.25},
+    "anthropic/claude-sonnet-4.6":   {"in": 3.0,   "out": 15.0, "cache_read": 0.3,    "cache_write": 3.75},
+    "anthropic/claude-haiku-4.5":    {"in": 1.0,   "out": 5.0,  "cache_read": 0.1,    "cache_write": 1.25},
+    "openai/gpt-5.5":                {"in": 5.0,   "out": 30.0, "cache_read": 0.5,    "cache_write": 0.0},
+    "qwen/qwen3.7-max":              {"in": 1.25,  "out": 3.75, "cache_read": 0.25,   "cache_write": 1.5625},
+    "deepseek/deepseek-v4-pro":      {"in": 0.435, "out": 0.87, "cache_read": 0.0036, "cache_write": 0.0},
+    "google/gemini-3.5-flash":       {"in": 1.5,   "out": 9.0,  "cache_read": 0.15,   "cache_write": 0.0833},
+    "google/gemini-3.1-pro-preview": {"in": 2.0,   "out": 12.0, "cache_read": 0.2,    "cache_write": 0.375},
 }
 
 
+def _load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+_PRICING_DB = _load_json(PRICING_FILE, {}).get("models", {})
+_OVERRIDES = _load_json(OVERRIDES_FILE, {})
+_OV_MODELS = _OVERRIDES.get("models", {})
+_OV_ALIASES = _OVERRIDES.get("aliases", {})
+
+# 家族关键字 → 代表性 canonical id(精确匹配失败时回退)。
+_FAMILY = [
+    ("opus",     "anthropic/claude-opus-4.8"),
+    ("sonnet",   "anthropic/claude-sonnet-4.6"),
+    ("haiku",    "anthropic/claude-haiku-4.5"),
+    ("gpt-5",    "openai/gpt-5.5"),
+    ("qwen",     "qwen/qwen3.7-max"),
+    ("deepseek", "deepseek/deepseek-v4-pro"),
+]
+
+
+def _normalize(model: str):
+    """本地 model 名 → OpenRouter canonical id。免费档去 :free 按基础价;preview 后缀保留。"""
+    m = (model or "").strip().lower()
+    if not m or m == "<synthetic>":
+        return None
+    m = re.sub(r"[:\-]free$", "", m)                  # 免费档按基础价
+    if "/" in m:
+        return m                                      # 已是 OpenRouter 格式
+    if m.startswith("claude"):
+        m = re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", m)    # claude-opus-4-8 → claude-opus-4.8
+        return "anthropic/" + m
+    if re.match(r"(gpt|o\d|chatgpt)", m):
+        return "openai/" + m
+    if m.startswith("gemini"):
+        return "google/" + m
+    if m.startswith("grok"):
+        return "x-ai/" + m
+    if m.startswith("qwen"):
+        return "qwen/" + m
+    if m.startswith("deepseek"):
+        return "deepseek/" + m
+    return m
+
+
+def _resolve_id(model: str):
+    """解析到 canonical id;未知按 opus 兜底(偏保守)。<synthetic> 返回 None。"""
+    s = (model or "").strip()
+    if not s or s.lower() == "<synthetic>":
+        return None
+    if s in _OV_ALIASES:
+        return _OV_ALIASES[s]
+    norm = _normalize(model)
+    if norm and (norm in _OV_MODELS or norm in _PRICING_DB or norm in _DEFAULT_PRICES):
+        return norm
+    low = s.lower()
+    if "gemini" in low:                               # gemini 版本繁多,按 pro/flash 粗分回退
+        return "google/gemini-3.1-pro-preview" if "pro" in low else "google/gemini-3.5-flash"
+    for kw, rep in _FAMILY:
+        if kw in low:
+            return rep
+    return "anthropic/claude-opus-4.8"
+
+
+def _raw_price(model: str):
+    """统一查价 → {in,out,cache_read,cache_write,write1h?}。<synthetic>→全 0。"""
+    cid = _resolve_id(model)
+    if cid is None:
+        return {"in": 0.0, "out": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+    p = dict(_DEFAULT_PRICES.get(cid, {}))            # 内置兜底打底
+    p.update(_PRICING_DB.get(cid, {}))                # OpenRouter 基准
+    p.update(_OV_MODELS.get(cid, {}))                 # 本地覆盖优先
+    out = {"in": p.get("in", 0.0), "out": p.get("out", 0.0),
+           "cache_read": p.get("cache_read", 0.0), "cache_write": p.get("cache_write", 0.0)}
+    if "write1h" in p:
+        out["write1h"] = p["write1h"]
+    elif cid.startswith("anthropic/"):                # Anthropic 1h 写 = 2×输入价
+        out["write1h"] = out["in"] * 2
+    return out
+
+
 def price_for(model: str):
-    m = (model or "").lower()
-    for k in PRICING:
-        if k in m:
-            return PRICING[k]
-    return PRICING["opus"]  # 未知模型按 opus 估(偏保守上限)
+    """Claude 成本用:补 write5m/write1h 两档(write5m = OpenRouter cache_write)。"""
+    p = _raw_price(model)
+    return {"in": p["in"], "out": p["out"], "cache_read": p["cache_read"],
+            "write5m": p["cache_write"], "write1h": p.get("write1h", p["cache_write"])}
 
 
-RANGE_KEYS = ["today", "yesterday", "week", "month"]
+def gemini_price(model: str):
+    """Gemini 成本用:in/out/cache_read 取统一查价(OpenRouter 已分版本,比正则更准)。"""
+    return _raw_price(model)
+
+
+RANGE_KEYS = ["today", "yesterday", "week", "month", "year"]
 
 
 def nice_model(m: str) -> str:
-    """claude-opus-4-7 → Opus 4.7;<synthetic> → 合成。"""
+    """claude-opus-4-7 → Opus 4.7;<synthetic> → 合成;其它去前缀/-free 后美化。"""
     if not m or m == "<synthetic>":
         return "合成"
-    s = m.lower()
-    fam = ("Opus" if "opus" in s else "Sonnet" if "sonnet" in s
-           else "Haiku" if "haiku" in s else m)
     import re
-    mt = re.search(r"(\d+)-(\d+)", s)
-    return f"{fam} {mt.group(1)}.{mt.group(2)}" if mt else fam
+    s = m.lower()
+    for key, disp in (("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")):
+        if key in s:
+            mt = re.search(r"(\d+)-(\d+)", s)
+            return f"{disp} {mt.group(1)}.{mt.group(2)}" if mt else disp
+    name = re.sub(r"[-:](free|preview|latest)$", "", m.split("/")[-1]).replace("-", " ")
+    return " ".join(w[:1].upper() + w[1:] if w[:1].isalpha() else w
+                    for w in name.split())
 
 
 def range_bounds():
-    """返回今日/昨日/本周(周一起)/本月(1号起)的本地起点。"""
+    """返回今日/昨日/本周(周一起)/本月(1号起)/本年(1月1日起)的本地起点。"""
     now = datetime.now().astimezone()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     yesterday = today - timedelta(days=1)
     week = today - timedelta(days=today.weekday())   # 周一 0
     month = today.replace(day=1)
-    return {"today": today, "yesterday": yesterday, "week": week, "month": month}
+    year = today.replace(month=1, day=1)
+    return {"today": today, "yesterday": yesterday, "week": week, "month": month, "year": year}
 
 
 def classify(dt, b):
-    """给定本地化 dt,返回它命中的区间 key 列表(今日同时属本周/本月)。"""
+    """给定本地化 dt,返回它命中的区间 key 列表(今日同时属本周/本月/本年)。"""
     d = dt.date()
     ks = []
     if d == b["today"].date():
@@ -73,6 +181,8 @@ def classify(dt, b):
         ks.append("week")
     if dt >= b["month"]:
         ks.append("month")
+    if dt >= b["year"]:
+        ks.append("year")
     return ks
 
 
@@ -92,57 +202,115 @@ def human(n: float) -> str:
     return f"{n:.0f}"
 
 
+# ---------- 增量扫描缓存 ----------
+import tempfile as _tempfile
+_SCAN_CACHE_FILE = os.path.join(_tempfile.gettempdir(), "_tokei_scan_cache.json")
+_SCAN_CACHE_VERSION = 2
+
+
+def _load_scan_cache():
+    try:
+        with open(_SCAN_CACHE_FILE, "r") as f:
+            c = json.load(f)
+        if c.get("v") != _SCAN_CACHE_VERSION:
+            return {"v": _SCAN_CACHE_VERSION}
+        return c
+    except Exception:
+        return {"v": _SCAN_CACHE_VERSION}
+
+
+def _save_scan_cache(cache):
+    cache["v"] = _SCAN_CACHE_VERSION
+    try:
+        with open(_SCAN_CACHE_FILE, "w") as f:
+            json.dump(cache, f, separators=(',', ':'))
+    except Exception:
+        pass
+
+
 # ---------- Claude Code ----------
-def scan_claude(bounds):
-    scan_from = min(bounds["yesterday"], bounds["week"], bounds["month"]).timestamp()
-    # 各区间分桶累加
-    B = {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "models": {}} for k in RANGE_KEYS}
-    # 当前会话 = 最近修改的 jsonl,累计其整段 usage
-    cur_in = cur_out = cur_cr = cur_cw = 0
+def scan_claude(bounds, cache):
+    fc = cache.setdefault("claude", {})
+    B = {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "models": {}, "sessions": set()}
+         for k in RANGE_KEYS}
     cur_file, cur_mtime = None, -1.0
 
+    today_d = bounds["today"].date()
+    yest_d = bounds["yesterday"].date()
+    week_d = bounds["week"].date()
+    month_d = bounds["month"].date()
+    year_d = bounds["year"].date()
+
+    stale = set(fc.keys())
+
     for f in glob.glob(os.path.join(CLAUDE_DIR, "*", "*.jsonl")):
+        stale.discard(f)
         try:
-            mtime = os.path.getmtime(f)
+            st = os.stat(f)
         except OSError:
             continue
-        in_range = mtime >= scan_from
-        is_current = mtime > cur_mtime
-        if not in_range and not is_current:
-            continue
-        rows = []
-        try:
-            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
-                for line in fh:
-                    if '"usage"' not in line:
-                        continue
-                    rows.append(line)
-        except OSError:
-            continue
+        mtime, size = st.st_mtime, st.st_size
+        if mtime > cur_mtime:
+            cur_mtime = mtime
+            cur_file = f
+        sig = f"{mtime}:{size}"
+        entry = fc.get(f)
+        if not entry or entry.get("sig") != sig:
+            days = {}
+            try:
+                with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        if '"usage"' not in line:
+                            continue
+                        u = _claude_usage(line, want_dt=True)
+                        if not u:
+                            continue
+                        dk = u["dt"].date().isoformat()
+                        day = days.setdefault(dk, {"in": 0, "out": 0, "cr": 0, "cw": 0,
+                                                   "cost": 0.0, "models": {}})
+                        day["in"] += u["in"]; day["out"] += u["out"]
+                        day["cr"] += u["cr"]; day["cw"] += u["cw"]; day["cost"] += u["cost"]
+                        mm = day["models"].setdefault(
+                            u["model"], {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
+                        mm["in"] += u["in"]; mm["out"] += u["out"]
+                        mm["cr"] += u["cr"]; mm["cw"] += u["cw"]; mm["cost"] += u["cost"]
+            except OSError:
+                continue
+            fc[f] = {"sig": sig, "days": days}
 
-        if is_current:
-            ci = co = ccr = ccw = 0
-            for line in rows:
-                u = _claude_usage(line)
-                if not u:
-                    continue
-                ci += u["in"]; co += u["out"]; ccr += u["cr"]; ccw += u["cw"]
-            cur_in, cur_out, cur_cr, cur_cw = ci, co, ccr, ccw
-            cur_file, cur_mtime = f, mtime
+    for p in stale:
+        fc.pop(p, None)
 
-        if in_range:
-            for line in rows:
-                u = _claude_usage(line, want_dt=True)
-                if not u:
-                    continue
-                for k in classify(u["dt"], bounds):
-                    b = B[k]
-                    b["in"] += u["in"]; b["out"] += u["out"]
-                    b["cr"] += u["cr"]; b["cw"] += u["cw"]; b["cost"] += u["cost"]
-                    mm = b["models"].setdefault(
-                        u["model"], {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
-                    mm["in"] += u["in"]; mm["out"] += u["out"]
-                    mm["cr"] += u["cr"]; mm["cw"] += u["cw"]; mm["cost"] += u["cost"]
+    # Assembly: per-day → range buckets
+    for f, entry in fc.items():
+        for dk, day in entry.get("days", {}).items():
+            d = date.fromisoformat(dk)
+            ks = []
+            if d == today_d: ks.append("today")
+            if d == yest_d: ks.append("yesterday")
+            if d >= week_d: ks.append("week")
+            if d >= month_d: ks.append("month")
+            if d >= year_d: ks.append("year")
+            if not ks:
+                continue
+            for k in ks:
+                b = B[k]
+                b["sessions"].add(f)
+                b["in"] += day["in"]; b["out"] += day["out"]
+                b["cr"] += day["cr"]; b["cw"] += day["cw"]; b["cost"] += day["cost"]
+                for mn, mv in day["models"].items():
+                    mm = b["models"].setdefault(mn, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
+                    mm["in"] += mv["in"]; mm["out"] += mv["out"]
+                    mm["cr"] += mv["cr"]; mm["cw"] += mv["cw"]; mm["cost"] += mv["cost"]
+
+    # Current session: sum all days of the most recently modified file
+    cur_in = cur_out = cur_cr = cur_cw = 0
+    if cur_file:
+        entry = fc.get(cur_file)
+        if entry:
+            for day in entry.get("days", {}).values():
+                cur_in += day["in"]; cur_out += day["out"]
+                cur_cr += day["cr"]; cur_cw += day["cw"]
 
     return {
         "ranges": B,
@@ -190,122 +358,130 @@ def _claude_usage(line, want_dt=False):
 
 
 # ---------- Codex ----------
-def scan_codex(bounds):
-    scan_from = min(bounds["yesterday"], bounds["week"], bounds["month"]).timestamp()
-    # 各区间分桶累加(用 last_token_usage 增量)
-    B = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0.0} for k in RANGE_KEYS}
-    # 主额度只认 limit_id == "codex";其它桶(如 codex_bengalfox / 单模型额度)忽略
-    latest_ts = None
-    latest_limits = None
-    plan_type = None
-    # 全局回退:任意 limit_id 的最新一条,仅在没有 "codex" 主额度时才用
-    g_ts = None
-    g_limits = None
-    g_plan = None
-    cur_total = None                      # 当前会话累计(total_token_usage 最后一条)
-    cur_mtime = -1.0
+def scan_codex(bounds, cache):
+    fc = cache.setdefault("codex", {})
+    B = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0.0, "sessions": set()}
+         for k in RANGE_KEYS}
+    cx_base = _raw_price("openai/gpt-5.5")
 
-    # Codex 长会话会跨天:某区间事件常写在更早日期目录的文件里。
-    # 所以按"文件 mtime 在扫描窗口内"筛,而非目录日期。
-    files = []
+    today_d = bounds["today"].date()
+    yest_d = bounds["yesterday"].date()
+    week_d = bounds["week"].date()
+    month_d = bounds["month"].date()
+    year_d = bounds["year"].date()
+
+    cur_file, cur_mtime = None, -1.0
+    stale = set(fc.keys())
+
     for f in glob.glob(os.path.join(CODEX_DIR, "**", "rollout-*.jsonl"), recursive=True):
+        stale.discard(f)
         try:
-            if os.path.getmtime(f) >= scan_from:
-                files.append(f)
+            st = os.stat(f)
         except OSError:
             continue
-    files.sort(key=os.path.getmtime)
-
-    for f in files:
-        try:
-            mtime = os.path.getmtime(f)
-        except OSError:
-            continue
-        is_current = mtime > cur_mtime
-        last_total_in_file = None
-        try:
-            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
-                for line in fh:
-                    if '"token_count"' not in line:
-                        continue
-                    try:
-                        o = json.loads(line)
-                    except Exception:
-                        continue
-                    info = (o.get("payload") or {}).get("info") or {}
-                    last = info.get("last_token_usage") or {}
-                    total = info.get("total_token_usage") or {}
-                    if total:
-                        last_total_in_file = total
-                    ts = parse_ts(o.get("timestamp", ""))
-                    # 今日额度:主额度取 limit_id == "codex" 的最新一条;
-                    # 同时记一份全局最新(任意 limit_id)作为无主额度时的回退
-                    rl = (o.get("payload") or {}).get("rate_limits")
-                    if ts and rl:
-                        if g_ts is None or ts > g_ts:
-                            g_ts = ts
-                            g_limits = rl
-                            g_plan = rl.get("plan_type")
-                        if rl.get("limit_id") == "codex" and (latest_ts is None or ts > latest_ts):
-                            latest_ts = ts
-                            latest_limits = rl
-                            plan_type = rl.get("plan_type")
-                    # 今日 token:last_token_usage 增量,按本地今日过滤
-                    if ts and last:
-                        ks = classify(ts.astimezone(), bounds)
-                        if ks:
-                            li = last.get("input_tokens", 0) or 0
-                            lc = last.get("cached_input_tokens", 0) or 0
-                            lo = last.get("output_tokens", 0) or 0      # 已含 reasoning
-                            lr = last.get("reasoning_output_tokens", 0) or 0
-                            # 分档:该请求 input_tokens >272K 走高价档
-                            hi = li > 272_000
-                            p_in = 10.0 if hi else 5.0
-                            p_out = 45.0 if hi else 30.0
-                            p_cr = 1.0 if hi else 0.5
-                            cost = (li - lc) / 1e6 * p_in + lc / 1e6 * p_cr + lo / 1e6 * p_out
-                            for k in ks:
-                                b = B[k]
-                                b["in"] += li; b["cached"] += lc
-                                b["out"] += lo; b["reason"] += lr; b["cost"] += cost
-        except OSError:
-            continue
-        if is_current and last_total_in_file is not None:
-            cur_total = last_total_in_file
+        mtime, size = st.st_mtime, st.st_size
+        if mtime > cur_mtime:
             cur_mtime = mtime
-
-    # 今日有额度事件但没有 "codex" 主额度桶时,回退到今日全局最新一条
-    if latest_limits is None and g_limits is not None:
-        latest_limits = g_limits
-        plan_type = g_plan
-
-    # 今天完全没用 codex 时,回退到全局最新一个会话文件;
-    # 同一文件内仍优先 limit_id == "codex" 主额度,无则取最后一条任意桶
-    if latest_limits is None:
-        allf = glob.glob(os.path.join(CODEX_DIR, "**", "rollout-*.jsonl"), recursive=True)
-        if allf:
-            newest = max(allf, key=os.path.getmtime)
-            fallback_rl = None
+            cur_file = f
+        sig = f"{mtime}:{size}"
+        entry = fc.get(f)
+        if not entry or entry.get("sig") != sig:
+            days = {}
+            file_limits = None; file_limits_ts = None; file_plan = None
+            file_g_limits = None; file_g_ts = None; file_g_plan = None
+            file_last_total = None
             try:
-                with open(newest, "r", encoding="utf-8", errors="ignore") as fh:
+                with open(f, "r", encoding="utf-8", errors="ignore") as fh:
                     for line in fh:
-                        if '"rate_limits"' not in line:
+                        if '"token_count"' not in line:
                             continue
                         try:
-                            rl = (json.loads(line).get("payload") or {}).get("rate_limits")
+                            o = json.loads(line)
                         except Exception:
                             continue
-                        if not rl:
-                            continue
-                        fallback_rl = rl
-                        if rl.get("limit_id") == "codex":
-                            latest_limits = rl
-                            plan_type = rl.get("plan_type")
+                        info = (o.get("payload") or {}).get("info") or {}
+                        last = info.get("last_token_usage") or {}
+                        total = info.get("total_token_usage") or {}
+                        if total:
+                            file_last_total = total
+                        ts = parse_ts(o.get("timestamp", ""))
+                        rl = (o.get("payload") or {}).get("rate_limits")
+                        if ts and rl:
+                            ts_iso = ts.isoformat()
+                            if file_g_ts is None or ts_iso > file_g_ts:
+                                file_g_ts = ts_iso
+                                file_g_limits = rl
+                                file_g_plan = rl.get("plan_type")
+                            if rl.get("limit_id") == "codex" and (file_limits_ts is None or ts_iso > file_limits_ts):
+                                file_limits_ts = ts_iso
+                                file_limits = rl
+                                file_plan = rl.get("plan_type")
+                        if ts and last:
+                            dk = ts.astimezone().date().isoformat()
+                            li = last.get("input_tokens", 0) or 0
+                            lc = last.get("cached_input_tokens", 0) or 0
+                            lo = last.get("output_tokens", 0) or 0
+                            lr = last.get("reasoning_output_tokens", 0) or 0
+                            hi = li > 272_000
+                            p_in = cx_base["in"] * (2 if hi else 1)
+                            p_out = cx_base["out"] * (1.5 if hi else 1)
+                            p_cr = cx_base["cache_read"] * (2 if hi else 1)
+                            cost = (li - lc) / 1e6 * p_in + lc / 1e6 * p_cr + lo / 1e6 * p_out
+                            day = days.setdefault(dk, {"in": 0, "cached": 0, "out": 0,
+                                                       "reason": 0, "cost": 0.0})
+                            day["in"] += li; day["cached"] += lc
+                            day["out"] += lo; day["reason"] += lr; day["cost"] += cost
             except OSError:
-                pass
-            if latest_limits is None and fallback_rl is not None:
-                latest_limits = fallback_rl
-                plan_type = fallback_rl.get("plan_type")
+                continue
+            fc[f] = {"sig": sig, "days": days,
+                     "limits": file_limits, "limits_ts": file_limits_ts, "plan": file_plan,
+                     "g_limits": file_g_limits, "g_ts": file_g_ts, "g_plan": file_g_plan,
+                     "last_total": file_last_total}
+
+    for p in stale:
+        fc.pop(p, None)
+
+    # Assembly: per-day → range buckets
+    for f, entry in fc.items():
+        for dk, day in entry.get("days", {}).items():
+            d = date.fromisoformat(dk)
+            ks = []
+            if d == today_d: ks.append("today")
+            if d == yest_d: ks.append("yesterday")
+            if d >= week_d: ks.append("week")
+            if d >= month_d: ks.append("month")
+            if d >= year_d: ks.append("year")
+            if not ks:
+                continue
+            for k in ks:
+                b = B[k]
+                b["sessions"].add(f)
+                b["in"] += day["in"]; b["cached"] += day["cached"]
+                b["out"] += day["out"]; b["reason"] += day["reason"]; b["cost"] += day["cost"]
+
+    # Find latest limits across all cached files
+    latest_limits = None; latest_ts = None; plan_type = None
+    g_limits = None; g_ts = None
+    for entry in fc.values():
+        if entry.get("limits_ts"):
+            if latest_ts is None or entry["limits_ts"] > latest_ts:
+                latest_ts = entry["limits_ts"]
+                latest_limits = entry["limits"]
+                plan_type = entry["plan"]
+        if entry.get("g_ts"):
+            if g_ts is None or entry["g_ts"] > g_ts:
+                g_ts = entry["g_ts"]
+                g_limits = entry["g_limits"]
+
+    if latest_limits is None and g_limits is not None:
+        latest_limits = g_limits
+        plan_type = (g_limits or {}).get("plan_type")
+
+    cur_total = None
+    if cur_file:
+        entry = fc.get(cur_file)
+        if entry:
+            cur_total = entry.get("last_total")
 
     return {
         "ranges": B,
@@ -313,6 +489,116 @@ def scan_codex(bounds):
         "limits": latest_limits,
         "plan": plan_type,
     }
+
+
+# ---------- Gemini CLI ----------
+# 日志:~/.gemini/tmp/<projectHash>/chats/session-*.json
+# assistant 行 type=="gemini",tokens={input,output,cached,thoughts,total}
+# (total=input+output+thoughts,cached⊂input)。增量快照共用 sessionId,按 lastUpdated 去重。
+def scan_gemini(bounds):
+    scan_from = min(bounds["yesterday"], bounds["week"], bounds["month"], bounds["year"]).timestamp()
+    best = {}  # sessionId -> (lastUpdated, data),同 id 取最新快照
+    for f in glob.glob(os.path.join(GEMINI_DIR, "*", "chats", "session-*.json")):
+        try:
+            if os.path.getmtime(f) < scan_from:
+                continue
+        except OSError:
+            continue
+        try:
+            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                d = json.load(fh)
+        except Exception:
+            continue
+        sid = d.get("sessionId") or f
+        lu = d.get("lastUpdated") or ""
+        if sid not in best or lu > best[sid][0]:
+            best[sid] = (lu, d)
+
+    B = {k: {"in": 0, "out": 0, "cached": 0, "thoughts": 0, "cost": 0.0,
+             "models": {}, "sessions": set()}
+         for k in RANGE_KEYS}
+    for sid, (lu, d) in best.items():
+        for m in d.get("messages", []):
+            if m.get("type") != "gemini":
+                continue
+            tk = m.get("tokens")
+            if not tk:
+                continue
+            dt = parse_ts(m.get("timestamp", ""))
+            if dt is None:
+                continue
+            ks = classify(dt.astimezone(), bounds)
+            if not ks:
+                continue
+            model = m.get("model")
+            inp = tk.get("input", 0) or 0
+            out = tk.get("output", 0) or 0
+            cached = tk.get("cached", 0) or 0
+            th = tk.get("thoughts", 0) or 0
+            p = gemini_price(model)
+            cost = (max(inp - cached, 0) / 1e6 * p["in"]
+                    + cached / 1e6 * p["cache_read"]
+                    + (out + th) / 1e6 * p["out"])
+            for k in ks:
+                b = B[k]
+                b["sessions"].add(sid)
+                b["in"] += inp; b["out"] += out
+                b["cached"] += cached; b["thoughts"] += th; b["cost"] += cost
+                mm = b["models"].setdefault(
+                    model, {"in": 0, "out": 0, "cached": 0, "thoughts": 0, "cost": 0.0})
+                mm["in"] += inp; mm["out"] += out
+                mm["cached"] += cached; mm["thoughts"] += th; mm["cost"] += cost
+    return {"ranges": B}
+
+
+# ---------- Grok CLI ----------
+# 日志:~/.grok/sessions/<cwd>/<uuid>/{summary.json,updates.jsonl}
+# 无输入/输出拆分,只有 updates.jsonl 里 _meta.totalTokens(上下文窗口累计,单调递增)。
+# 取其最大值作"上下文规模"代理,非真实消耗量,故降级展示、不估成本。
+def scan_grok(bounds):
+    B = {k: {"tokens": 0, "sessions": set()} for k in RANGE_KEYS}
+    latest_mtime = -1.0
+    latest_model = None
+    for sm in glob.glob(os.path.join(GROK_DIR, "*", "*", "summary.json")):
+        try:
+            mtime = os.path.getmtime(sm)
+        except OSError:
+            continue
+        try:
+            with open(sm, "r", encoding="utf-8", errors="ignore") as fh:
+                s = json.load(fh)
+        except Exception:
+            continue
+        if mtime > latest_mtime:
+            latest_mtime = mtime
+            latest_model = s.get("current_model_id")
+        dt = parse_ts(s.get("updated_at") or s.get("created_at") or "")
+        if dt is None:
+            continue
+        ks = classify(dt.astimezone(), bounds)
+        if not ks:
+            continue
+        mx = 0
+        uj = os.path.join(os.path.dirname(sm), "updates.jsonl")
+        try:
+            with open(uj, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    if "totalTokens" not in line:
+                        continue
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    tt = (((o.get("params") or {}).get("_meta") or {}).get("totalTokens"))
+                    if isinstance(tt, (int, float)) and tt > mx:
+                        mx = int(tt)
+        except OSError:
+            pass
+        sid = (s.get("info") or {}).get("id") or sm
+        for k in ks:
+            B[k]["tokens"] += mx
+            B[k]["sessions"].add(sid)
+    return {"ranges": B, "model": latest_model}
 
 
 def fmt_reset(epoch):
@@ -334,7 +620,7 @@ def _iso_to_epoch(s):
     return int(dt.timestamp()) if dt else None
 
 
-def scan_claude_plan():
+def _scan_claude_plan_raw():
     import shutil
     import subprocess
     import tempfile
@@ -381,28 +667,80 @@ def scan_claude_plan():
     }
 
 
+# Claude 额度只存在 Claude Desktop 的易失缓存条目里,缓存被淘汰/重写的瞬间会读不到。
+# 成功时落盘一份,失败时回退到最近一次有效值(30 分钟内,避免跨 reset 显示陈旧)。
+_QUOTA_FALLBACK_TTL = 1800
+
+def scan_claude_plan():
+    import tempfile
+    import time
+    cache = os.path.join(tempfile.gettempdir(), "_tokei_claude_quota.json")
+    r = _scan_claude_plan_raw()
+    if r and r.get("q5") is not None:
+        try:
+            with open(cache, "w") as fh:
+                json.dump({"t": time.time(), "v": r}, fh)
+        except OSError:
+            pass
+        return r
+    try:
+        with open(cache) as fh:
+            c = json.load(fh)
+        if time.time() - c["t"] < _QUOTA_FALLBACK_TTL:
+            return c["v"]
+    except Exception:
+        pass
+    return r
+
+
 def compute():
     bounds = range_bounds()
-    cc = scan_claude(bounds)
-    cx = scan_codex(bounds)
+    cache = _load_scan_cache()
+    cc = scan_claude(bounds, cache)
+    cx = scan_codex(bounds, cache)
+    gm = scan_gemini(bounds)
+    gk = scan_grok(bounds)
+    _save_scan_cache(cache)
 
     def claude_range(b):
         denom = b["cr"] + b["cw"] + b["in"]
         hit = (b["cr"] / denom * 100) if denom else 0.0
-        models = [{"name": nice_model(n), "in": v["in"], "out": v["out"],
-                   "cr": v["cr"], "cw": v["cw"], "cost": v["cost"]}
-                  for n, v in sorted(b["models"].items(),
-                                     key=lambda kv: -kv[1]["cost"])]
+        models = []
+        for n, v in sorted(b["models"].items(), key=lambda kv: -kv[1]["cost"]):
+            p = price_for(n)
+            models.append({"name": nice_model(n), "in": v["in"], "out": v["out"],
+                           "cr": v["cr"], "cw": v["cw"], "cost": v["cost"],
+                           "pin": p["in"], "pout": p["out"]})
         return {"hit": hit, "in": b["in"], "out": b["out"],
-                "cr": b["cr"], "cw": b["cw"], "cost": b["cost"], "models": models}
+                "cr": b["cr"], "cw": b["cw"], "cost": b["cost"], "models": models,
+                "sessions": len(b["sessions"])}
 
     def codex_range(b):
         hit = (b["cached"] / b["in"] * 100) if b["in"] else 0.0
         return {"hit": hit, "in": b["in"] - b["cached"], "cached": b["cached"],
-                "out": b["out"], "reason": b["reason"], "cost": b["cost"]}
+                "out": b["out"], "reason": b["reason"], "cost": b["cost"],
+                "sessions": len(b["sessions"])}
+
+    def gemini_range(b):
+        # tokens.input 含 cached,展示口径与 Codex 一致:输入=非缓存部分
+        hit = (b["cached"] / b["in"] * 100) if b["in"] else 0.0
+        models = []
+        for n, v in sorted(b["models"].items(), key=lambda kv: -kv[1]["cost"]):
+            p = gemini_price(n)
+            models.append({"name": nice_model(n), "in": max(v["in"] - v["cached"], 0),
+                           "out": v["out"], "cached": v["cached"], "thoughts": v["thoughts"],
+                           "cost": v["cost"], "pin": p["in"], "pout": p["out"]})
+        return {"hit": hit, "in": max(b["in"] - b["cached"], 0), "out": b["out"],
+                "cached": b["cached"], "thoughts": b["thoughts"], "cost": b["cost"],
+                "models": models, "sessions": len(b["sessions"])}
+
+    def grok_range(b):
+        return {"tokens": b["tokens"], "sessions": len(b["sessions"])}
 
     cranges = {k: claude_range(cc["ranges"][k]) for k in RANGE_KEYS}
     xranges = {k: codex_range(cx["ranges"][k]) for k in RANGE_KEYS}
+    granges = {k: gemini_range(gm["ranges"][k]) for k in RANGE_KEYS}
+    kranges = {k: grok_range(gk["ranges"][k]) for k in RANGE_KEYS}
 
     cur = cc["cur"]
     cur_total = cur["in"] + cur["out"] + cur["cr"] + cur["cw"]
@@ -426,6 +764,13 @@ def compute():
             "ranges": xranges,
             "p5": p5, "pw": pw, "r5": r5, "rw": rw,
             "plan": cx["plan"],
+        },
+        "gemini": {
+            "ranges": granges,
+        },
+        "grok": {
+            "ranges": kranges,
+            "model": gk["model"],
         },
     }
 
@@ -485,10 +830,73 @@ def main():
     if x["plan"]:
         print(f"plan: {x['plan']} {F}")
     print("---")
+    # Gemini 块
+    g = d["gemini"]
+    gt = g["ranges"]["today"]
+    print(f"Gemini CLI {HEAD}")
+    print(f"命中率   {gt['hit']:5.1f}% {F}")
+    print(f"今日 输入   {human(gt['in']):>6} {F}")
+    print(f"今日 输出   {human(gt['out']):>6} {F}")
+    print(f"今日 缓存   {human(gt['cached']):>6} {F}")
+    if gt.get("thoughts"):
+        print(f"今日 推理   {human(gt['thoughts']):>6} {F}")
+    print(f"今日 ≈成本  ${gt['cost']:.2f} {F}")
+    print(f"  (按 API 价估,非订阅实付) | font=Menlo size=11")
+    print("---")
+    # Grok 块(降级:仅上下文 token,不估成本)
+    gk = d["grok"]
+    kt = gk["ranges"]["today"]
+    print(f"Grok CLI {HEAD}")
+    print(f"今日 会话   {kt['sessions']:>6} {F}")
+    print(f"上下文 token {human(kt['tokens']):>6} {F}")
+    if gk.get("model"):
+        print(f"model: {gk['model']} {F}")
+    print(f"  (仅上下文 token,非消耗量;成本 —) | font=Menlo size=11")
+    print("---")
     print("刷新 | refresh=true")
 
 
+def update_prices():
+    """显式联网:拉 OpenRouter /api/v1/models,刷新 pricing.json(不动 overrides)。"""
+    import urllib.request
+    try:
+        with urllib.request.urlopen("https://openrouter.ai/api/v1/models", timeout=30) as r:
+            data = json.load(r)["data"]
+    except Exception as e:
+        print(f"更新失败:{e}", file=sys.stderr)
+        return 1
+
+    def mtok(pr, k):
+        try:
+            return round(float(pr.get(k) or 0) * 1e6, 6)
+        except (TypeError, ValueError):
+            return 0.0
+
+    models = {}
+    for m in data:
+        pr = m.get("pricing") or {}
+        if not mtok(pr, "prompt") and not mtok(pr, "completion"):
+            continue                              # 跳过无价(免费/路由占位)条目
+        models[m["id"]] = {"in": mtok(pr, "prompt"), "out": mtok(pr, "completion"),
+                           "cache_read": mtok(pr, "input_cache_read"),
+                           "cache_write": mtok(pr, "input_cache_write")}
+    payload = {"_meta": {"source": "openrouter/api/v1/models",
+                         "updated_at": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z"),
+                         "count": len(models)},
+               "models": models}
+    with open(PRICING_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=1, sort_keys=True)
+    print(f"已更新 {len(models)} 个模型 → {PRICING_FILE}")
+    try:
+        os.remove(_SCAN_CACHE_FILE)
+    except OSError:
+        pass
+    return 0
+
+
 if __name__ == "__main__":
+    if "--update-prices" in sys.argv:
+        sys.exit(update_prices())
     if "--json" in sys.argv:
         main_json()
     else:

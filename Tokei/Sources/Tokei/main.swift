@@ -23,6 +23,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var popover = NSPopover()
     var timer: Timer?
 
+    // 菜单栏家族品牌色(与面板 Theme.claude/codex 一致)。
+    static let claudeColor = NSColor(red: 0.97, green: 0.57, blue: 0.31, alpha: 1)
+    static let codexColor  = NSColor(red: 0.23, green: 0.76, blue: 0.66, alpha: 1)
+
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let b = statusItem.button {
@@ -66,28 +70,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func updateStatusTitle() {
         guard let b = statusItem?.button else { return }
-        let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
         let s = NSMutableAttributedString()
-        func sym(_ name: String) -> NSAttributedString {
-            let att = NSTextAttachment()
-            att.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-                .withSymbolConfiguration(cfg)
-            return NSAttributedString(attachment: att)
-        }
         let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .baselineOffset: 1]
+
+        // 一格 = 时钟图标 + 5h 剩余%,按家族品牌色着色(橙=Claude 青=Codex)。
+        func seg(_ value: String, _ color: NSColor) {
+            if s.length > 0 {
+                s.append(NSAttributedString(string: "  ", attributes: [.font: font]))
+            }
+            let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+            let img = NSImage(systemSymbolName: "clock.fill", accessibilityDescription: nil)?
+                .withSymbolConfiguration(cfg)
+            img?.isTemplate = false
+            let att = NSTextAttachment(); att.image = img
+            s.append(NSAttributedString(attachment: att))
+            s.append(NSAttributedString(string: " " + value,
+                attributes: [.font: font, .baselineOffset: 1, .foregroundColor: color]))
+        }
 
         if let u = store.usage {
-            s.append(sym("bolt.fill"))
-            s.append(NSAttributedString(string: String(format: " %.0f", u.claude.ranges.today.hit), attributes: attrs))
-            if let p5 = u.codex.p5 {
-                s.append(NSAttributedString(string: "  ", attributes: attrs))
-                s.append(sym("clock.fill"))
-                s.append(NSAttributedString(string: String(format: " %.0f", 100 - p5), attributes: attrs))
-            }
+            if let q5 = u.claude.q5 { seg(String(format: "%.0f", 100 - q5), Self.claudeColor) }
+            if let p5 = u.codex.p5 { seg(String(format: "%.0f", 100 - p5), Self.codexColor) }
+            if s.length == 0 { seg("—", .secondaryLabelColor) }   // 两家额度都暂缺
         } else {
-            s.append(sym("bolt.fill"))
-            s.append(NSAttributedString(string: " …", attributes: attrs))
+            seg("…", .secondaryLabelColor)                        // 加载中
         }
         b.attributedTitle = s
         b.image = nil
@@ -118,7 +125,7 @@ enum Shot {
             store.usage = usage
             store.lastUpdated = "预览"
             let content = PanelView(store: store)
-                .background(Color(red: 0.13, green: 0.13, blue: 0.14))
+                .background(Color(red: 0.22, green: 0.23, blue: 0.26))
             let renderer = ImageRenderer(content: content)
             renderer.scale = 2
             if let cg = renderer.cgImage {

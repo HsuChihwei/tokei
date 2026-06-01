@@ -4,6 +4,8 @@ import SwiftUI
 enum Theme {
     static let claude = Color(red: 0.97, green: 0.57, blue: 0.31)
     static let codex  = Color(red: 0.23, green: 0.76, blue: 0.66)
+    static let gemini = Color(red: 0.26, green: 0.52, blue: 0.96)   // #4285F4
+    static let grok   = Color(red: 0.72, green: 0.74, blue: 0.80)   // 银灰,示意降级
 
     static let panelWidth: CGFloat = 322
     static let cardRadius: CGFloat = 16
@@ -12,6 +14,18 @@ enum Theme {
     static var brand: LinearGradient {
         LinearGradient(colors: [claude, codex], startPoint: .leading, endPoint: .trailing)
     }
+
+    // 半透明深空灰:偏冷灰、低不透明度,让毛玻璃透出,质感高级。
+    static var bg: LinearGradient {
+        LinearGradient(colors: [Color(red: 0.24, green: 0.25, blue: 0.29).opacity(0.55),
+                                Color(red: 0.16, green: 0.17, blue: 0.20).opacity(0.62)],
+                       startPoint: .top, endPoint: .bottom)
+    }
+
+    // 语义文字色(暗底,提高可读性)
+    static let tPrimary   = Color.white.opacity(0.96)
+    static let tSecondary = Color.white.opacity(0.76)
+    static let tTertiary  = Color.white.opacity(0.52)
 }
 
 // 毛玻璃之上的浮起卡片:淡色填充 + 渐变描边 + 柔和投影。
@@ -24,16 +38,20 @@ struct Card<Content: View>: View {
             .padding(13)
             .background(
                 RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                    .fill(tint.opacity(0.07))
+                    .fill(Color.black.opacity(0.28))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                            .fill(tint.opacity(0.13))
+                    )
             )
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
                     .strokeBorder(
-                        LinearGradient(colors: [tint.opacity(0.40), tint.opacity(0.06)],
+                        LinearGradient(colors: [tint.opacity(0.60), tint.opacity(0.12)],
                                        startPoint: .topLeading, endPoint: .bottomTrailing),
                         lineWidth: 1)
             )
-            .shadow(color: tint.opacity(0.16), radius: 9, x: 0, y: 4)
+            .shadow(color: Color.black.opacity(0.35), radius: 10, x: 0, y: 5)
     }
 }
 
@@ -98,10 +116,10 @@ struct MetricCell: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(label)
                     .font(.system(size: 9.5))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.tTertiary)
                 Text(value)
                     .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(Theme.tPrimary)
             }
             Spacer(minLength: 0)
         }
@@ -121,7 +139,7 @@ struct CostHeadline: View {
                 .contentTransition(.numericText())
             Text(caption)
                 .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Theme.tTertiary)
             Spacer(minLength: 0)
         }
     }
