@@ -22,6 +22,8 @@ CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
 GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
 GROK_DIR = os.path.join(HOME, ".grok", "sessions")
 QODER_DIR = os.path.join(HOME, ".qoder")
+HERMES_DB = os.path.join(HOME, ".hermes", "state.db")
+OPENCLAW_DB = os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PRICING_FILE = os.path.join(BASE_DIR, "pricing.json")
@@ -721,6 +723,145 @@ def scan_qoder(bounds, cache):
     return {"ranges": B, "quota": quota, "model": model}
 
 
+# ---------- Hermes ----------
+# SQLite: ~/.hermes/state.db sessions 表,完整 token + cost 数据。
+def scan_hermes(bounds, cache):
+    import sqlite3 as _sq
+    fc = cache.setdefault("hermes", {})
+    empty = {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0.0,
+                 "sessions": 0, "models": {}} for k in RANGE_KEYS}
+    if not os.path.isfile(HERMES_DB):
+        return {"ranges": empty}
+    try:
+        sig = f"{os.path.getmtime(HERMES_DB)}:{os.path.getsize(HERMES_DB)}"
+    except OSError:
+        return {"ranges": empty}
+    entry = fc.get("db")
+    if not entry or entry.get("sig") != sig:
+        days = {}
+        try:
+            conn = _sq.connect(f"file:{HERMES_DB}?mode=ro", uri=True)
+            for row in conn.execute("""
+                SELECT date(started_at,'unixepoch','localtime') as day,
+                       COUNT(*) as cnt, model,
+                       COALESCE(SUM(input_tokens),0),
+                       COALESCE(SUM(output_tokens),0),
+                       COALESCE(SUM(cache_read_tokens),0),
+                       COALESCE(SUM(cache_write_tokens),0),
+                       COALESCE(SUM(reasoning_tokens),0),
+                       COALESCE(SUM(COALESCE(actual_cost_usd,estimated_cost_usd)),0)
+                FROM sessions WHERE started_at > 0
+                GROUP BY day, model
+            """):
+                dk, cnt, model, ti, to_, cr, cw, reason, cost = row
+                if not dk:
+                    continue
+                day = days.setdefault(dk, {"in": 0, "out": 0, "cr": 0, "cw": 0,
+                                           "reason": 0, "cost": 0.0, "sessions": 0, "models": {}})
+                day["in"] += int(ti); day["out"] += int(to_)
+                day["cr"] += int(cr); day["cw"] += int(cw)
+                day["reason"] += int(reason); day["cost"] += float(cost)
+                day["sessions"] += int(cnt)
+                if model:
+                    mm = day["models"].setdefault(model, {"in": 0, "out": 0, "cost": 0.0})
+                    mm["in"] += int(ti); mm["out"] += int(to_); mm["cost"] += float(cost)
+            conn.close()
+        except Exception:
+            pass
+        fc["db"] = {"sig": sig, "days": days}
+        entry = fc["db"]
+
+    today_d = bounds["today"].date()
+    yest_d = bounds["yesterday"].date()
+    week_d = bounds["week"].date()
+    month_d = bounds["month"].date()
+    year_d = bounds["year"].date()
+
+    B = {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0.0,
+             "sessions": 0, "models": {}} for k in RANGE_KEYS}
+    for dk, day in entry.get("days", {}).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        ks = []
+        if d == today_d: ks.append("today")
+        if d == yest_d: ks.append("yesterday")
+        if d >= week_d: ks.append("week")
+        if d >= month_d: ks.append("month")
+        if d >= year_d: ks.append("year")
+        for k in ks:
+            b = B[k]
+            b["in"] += day["in"]; b["out"] += day["out"]
+            b["cr"] += day["cr"]; b["cw"] += day["cw"]
+            b["reason"] += day["reason"]; b["cost"] += day["cost"]
+            b["sessions"] += day["sessions"]
+            for mn, mv in day.get("models", {}).items():
+                mm = b["models"].setdefault(mn, {"in": 0, "out": 0, "cost": 0.0})
+                mm["in"] += mv["in"]; mm["out"] += mv["out"]; mm["cost"] += mv["cost"]
+    return {"ranges": B}
+
+
+# ---------- OpenClaw ----------
+# SQLite: ~/.openclaw/tasks/runs.sqlite task_runs 表,仅任务记录,无 token。
+def scan_openclaw(bounds, cache):
+    import sqlite3 as _sq
+    fc = cache.setdefault("openclaw", {})
+    empty = {k: {"tasks": 0, "completed": 0, "failed": 0} for k in RANGE_KEYS}
+    if not os.path.isfile(OPENCLAW_DB):
+        return {"ranges": empty}
+    try:
+        sig = f"{os.path.getmtime(OPENCLAW_DB)}:{os.path.getsize(OPENCLAW_DB)}"
+    except OSError:
+        return {"ranges": empty}
+    entry = fc.get("db")
+    if not entry or entry.get("sig") != sig:
+        days = {}
+        try:
+            conn = _sq.connect(f"file:{OPENCLAW_DB}?mode=ro", uri=True)
+            for row in conn.execute("""
+                SELECT date(created_at/1000,'unixepoch','localtime') as day,
+                       COUNT(*) as total,
+                       SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END)
+                FROM task_runs WHERE created_at > 0
+                GROUP BY day
+            """):
+                dk, total, completed, failed = row
+                if dk:
+                    days[dk] = {"tasks": int(total or 0), "completed": int(completed or 0),
+                                "failed": int(failed or 0)}
+            conn.close()
+        except Exception:
+            pass
+        fc["db"] = {"sig": sig, "days": days}
+        entry = fc["db"]
+
+    today_d = bounds["today"].date()
+    yest_d = bounds["yesterday"].date()
+    week_d = bounds["week"].date()
+    month_d = bounds["month"].date()
+    year_d = bounds["year"].date()
+
+    B = {k: {"tasks": 0, "completed": 0, "failed": 0} for k in RANGE_KEYS}
+    for dk, day in entry.get("days", {}).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        ks = []
+        if d == today_d: ks.append("today")
+        if d == yest_d: ks.append("yesterday")
+        if d >= week_d: ks.append("week")
+        if d >= month_d: ks.append("month")
+        if d >= year_d: ks.append("year")
+        for k in ks:
+            b = B[k]
+            b["tasks"] += day["tasks"]; b["completed"] += day["completed"]
+            b["failed"] += day["failed"]
+    return {"ranges": B}
+
+
 def fmt_reset(epoch):
     try:
         return datetime.fromtimestamp(int(epoch)).astimezone().strftime("%m-%d %H:%M")
@@ -821,6 +962,8 @@ def compute():
     gm = scan_gemini(bounds)
     gk = scan_grok(bounds)
     qd = scan_qoder(bounds, cache)
+    hm = scan_hermes(bounds, cache)
+    oc = scan_openclaw(bounds, cache)
     _save_scan_cache(cache)
 
     def claude_range(b):
@@ -869,6 +1012,20 @@ def compute():
     kranges = {k: grok_range(gk["ranges"][k]) for k in RANGE_KEYS}
     qranges = {k: qoder_range(qd["ranges"][k]) for k in RANGE_KEYS}
 
+    def hermes_range(b):
+        denom = b["cr"] + b["cw"] + b["in"]
+        hit = (b["cr"] / denom * 100) if denom else 0.0
+        models = [{"name": nice_model(n), "in": v["in"], "out": v["out"], "cost": v["cost"]}
+                  for n, v in sorted(b["models"].items(), key=lambda kv: -kv[1]["cost"])]
+        return {"hit": hit, "in": b["in"], "out": b["out"], "cr": b["cr"], "cw": b["cw"],
+                "reason": b["reason"], "cost": b["cost"], "sessions": b["sessions"], "models": models}
+
+    def openclaw_range(b):
+        return {"tasks": b["tasks"], "completed": b["completed"], "failed": b["failed"]}
+
+    hranges = {k: hermes_range(hm["ranges"][k]) for k in RANGE_KEYS}
+    oranges = {k: openclaw_range(oc["ranges"][k]) for k in RANGE_KEYS}
+
     cur = cc["cur"]
     cur_total = cur["in"] + cur["out"] + cur["cr"] + cur["cw"]
 
@@ -904,6 +1061,12 @@ def compute():
             "quota": qd.get("quota"),
             "model": qd.get("model"),
         },
+        "hermes": {
+            "ranges": hranges,
+        },
+        "openclaw": {
+            "ranges": oranges,
+        },
     }
 
 
@@ -920,6 +1083,8 @@ def _load_tokei_config():
 
 def main_json():
     d = compute()
+    meta = _load_json(PRICING_FILE, {}).get("_meta", {})
+    d["_pricing"] = {"updated_at": meta.get("updated_at", ""), "count": meta.get("count", 0)}
     print(json.dumps(d, ensure_ascii=False))
     cfg = _load_tokei_config()
     if cfg:
@@ -1051,10 +1216,189 @@ def update_prices():
     return 0
 
 
+def _scan_local_models():
+    """扫描本地所有日志,收集出现过的模型名。"""
+    models = set()
+    for f in glob.glob(os.path.join(CLAUDE_DIR, "*", "*.jsonl")):
+        try:
+            for line in open(f, encoding="utf-8", errors="ignore"):
+                if '"model"' not in line:
+                    continue
+                try:
+                    m = json.loads(line).get("message", {}).get("model", "")
+                    if m and m != "<synthetic>":
+                        models.add(m)
+                except Exception:
+                    pass
+        except OSError:
+            pass
+    for f in glob.glob(os.path.join(GEMINI_DIR, "*", "chats", "session-*.json")):
+        try:
+            for msg in json.load(open(f)).get("messages", []):
+                m = msg.get("model", "")
+                if m:
+                    models.add(m)
+        except Exception:
+            pass
+    return models
+
+
+def _is_exact_match(model: str):
+    """检查模型是否有精确价格(非回退)。"""
+    s = (model or "").strip()
+    if not s or s.lower() == "<synthetic>":
+        return True
+    if s in _OV_ALIASES:
+        return True
+    norm = _normalize(model)
+    return norm and (norm in _OV_MODELS or norm in _PRICING_DB or norm in _DEFAULT_PRICES)
+
+
+def _estimate_from_sibling(model: str):
+    """尝试从同家族同 tier 的其他版本估价。"""
+    low = model.lower()
+    tiers = ["max", "plus", "flash", "lite", "turbo", "pro", "mini"]
+    tier = None
+    for t in tiers:
+        if t in low:
+            tier = t
+            break
+    if not tier:
+        return None
+    all_models = {}
+    all_models.update(_PRICING_DB)
+    all_models.update(_OV_MODELS)
+    candidates = []
+    for cid, p in all_models.items():
+        if tier in cid.lower():
+            family_match = False
+            for kw, _ in _FAMILY:
+                if kw in low and kw in cid.lower():
+                    family_match = True
+                    break
+            if family_match:
+                candidates.append((cid, p))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best_cid, best_p = candidates[0]
+    return {"source": best_cid, "in": best_p.get("in", 0), "out": best_p.get("out", 0),
+            "cache_read": best_p.get("cache_read", 0), "cache_write": best_p.get("cache_write", 0)}
+
+
+def update_unknown():
+    """扫描本地日志找未知模型,尝试从 OpenRouter 或同族估价,写入 overrides。"""
+    models = _scan_local_models()
+    unknown = []
+    for m in sorted(models):
+        if _is_exact_match(m):
+            continue
+        rid = _resolve_id(m)
+        cur = _raw_price(rid)
+        est = _estimate_from_sibling(m)
+        unknown.append({"model": m, "resolved_to": rid,
+                        "current": {"in": cur["in"], "out": cur["out"]},
+                        "estimate": est})
+
+    if not unknown:
+        result = {"status": "ok", "message": "所有模型价格已匹配", "count": 0, "added": []}
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+
+    try:
+        ovr = json.load(open(OVERRIDES_FILE, encoding="utf-8"))
+    except Exception:
+        ovr = {"models": {}, "aliases": {}}
+
+    added = []
+    for u in unknown:
+        name = u["model"]
+        norm = _normalize(name)
+        if not norm:
+            continue
+        if u["estimate"]:
+            e = u["estimate"]
+            ovr["models"][norm] = {"in": e["in"], "out": e["out"],
+                                   "cache_read": e["cache_read"], "cache_write": e["cache_write"]}
+            if name != norm:
+                ovr["aliases"][name] = norm
+            added.append({"model": name, "canonical": norm, "price": e,
+                          "method": f"estimated from {e['source']}"})
+        else:
+            if name != norm and norm not in ovr.get("aliases", {}):
+                ovr["aliases"][name] = norm
+            added.append({"model": name, "canonical": norm, "price": None,
+                          "method": "no estimate available, using fallback"})
+
+    with open(OVERRIDES_FILE, "w", encoding="utf-8") as f:
+        json.dump(ovr, f, ensure_ascii=False, indent=2)
+    try:
+        os.remove(_SCAN_CACHE_FILE)
+    except OSError:
+        pass
+
+    result = {"status": "ok", "count": len(added), "added": added}
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def daily_costs():
+    """输出按天+按模型的成本 JSON(从扫描缓存读,无额外 I/O)。"""
+    cache = _load_scan_cache()
+    days = {}
+    models = {}
+
+    for fp, entry in cache.get("claude", {}).items():
+        for dk, day in entry.get("days", {}).items():
+            d = days.setdefault(dk, {"claude": 0.0, "codex": 0.0,
+                                     "c_in": 0, "c_out": 0, "x_in": 0, "x_out": 0, "sessions": 0})
+            d["claude"] += day.get("cost", 0)
+            d["c_in"] += day.get("in", 0); d["c_out"] += day.get("out", 0)
+            d["sessions"] += 1
+            for mn, mv in day.get("models", {}).items():
+                nm = nice_model(mn)
+                m = models.setdefault(nm, {"cost": 0.0, "in": 0, "out": 0, "tool": "claude"})
+                m["cost"] += mv.get("cost", 0)
+                m["in"] += mv.get("in", 0); m["out"] += mv.get("out", 0)
+
+    for fp, entry in cache.get("codex", {}).items():
+        for dk, day in entry.get("days", {}).items():
+            d = days.setdefault(dk, {"claude": 0.0, "codex": 0.0,
+                                     "c_in": 0, "c_out": 0, "x_in": 0, "x_out": 0, "sessions": 0})
+            d["codex"] += day.get("cost", 0)
+            d["x_in"] += day.get("in", 0); d["x_out"] += day.get("out", 0)
+
+    codex_total = sum(d["codex"] for d in days.values())
+    codex_in = sum(d["x_in"] for d in days.values())
+    codex_out = sum(d["x_out"] for d in days.values())
+    if codex_total > 0:
+        models["GPT-5.5 (Codex)"] = {"cost": round(codex_total, 2), "in": codex_in, "out": codex_out, "tool": "codex"}
+
+    daily = [{"date": dk, "claude": round(v["claude"], 2), "codex": round(v["codex"], 2),
+              "total": round(v["claude"] + v["codex"], 2),
+              "c_in": v["c_in"], "c_out": v["c_out"], "x_in": v["x_in"], "x_out": v["x_out"]}
+             for dk, v in sorted(days.items())]
+    model_list = []
+    for n, v in sorted(models.items(), key=lambda kv: -kv[1]["cost"]):
+        if v["cost"] <= 0:
+            continue
+        out_k = v["out"] / 1000 if v["out"] else 0
+        cost_per_k = round(v["cost"] / out_k, 3) if out_k > 0 else 0
+        out_ratio = round(v["out"] / (v["in"] + v["out"]) * 100, 1) if (v["in"] + v["out"]) > 0 else 0
+        model_list.append({"name": n, "cost": round(v["cost"], 2), "in": v["in"], "out": v["out"],
+                           "tool": v["tool"], "cost_per_k": cost_per_k, "out_ratio": out_ratio})
+
+    print(json.dumps({"daily": daily, "models": model_list}, ensure_ascii=False))
+
+
 if __name__ == "__main__":
     if "--update-prices" in sys.argv:
         sys.exit(update_prices())
-    if "--json" in sys.argv:
+    if "--update-unknown" in sys.argv:
+        sys.exit(update_unknown())
+    if "--daily-costs" in sys.argv:
+        daily_costs()
+    elif "--json" in sys.argv:
         main_json()
     else:
         main()

@@ -143,6 +143,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             store.refresh()
             popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
+            DispatchQueue.main.async {
+                self.popover.contentViewController?.view.needsLayout = true
+                self.popover.contentViewController?.view.layoutSubtreeIfNeeded()
+                self.popover.contentSize = self.popover.contentViewController?.view.fittingSize ?? .zero
+            }
         }
     }
 }

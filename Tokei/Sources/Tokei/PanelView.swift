@@ -7,14 +7,17 @@ struct PanelView: View {
     @State private var claudeModelsOpen = false
     @State private var geminiModelsOpen = false
     @State private var settingsOpen = false
+    @State private var showDashboard = false
     @AppStorage("showClaude") private var showClaude = true
     @AppStorage("showCodex") private var showCodex = true
     @AppStorage("showGemini") private var showGemini = true
     @AppStorage("showGrok") private var showGrok = true
     @AppStorage("showQoder") private var showQoder = true
+    @AppStorage("showHermes") private var showHermes = true
+    @AppStorage("showOpenClaw") private var showOpenClaw = true
 
     private var visibleCount: Int {
-        [showClaude, showCodex, showGemini, showGrok, showQoder].filter { $0 }.count
+        [showClaude, showCodex, showGemini, showGrok, showQoder, showHermes, showOpenClaw].filter { $0 }.count
     }
     private var useWide: Bool { visibleCount > 2 }
     private var panelWidth: CGFloat { useWide ? 640 : Theme.panelWidth }
@@ -22,7 +25,9 @@ struct PanelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
             header
-            if let u = store.usage {
+            if showDashboard {
+                DashboardView()
+            } else if let u = store.usage {
                 SegmentedTabs(sel: $sel)
                 if useWide {
                     HStack(alignment: .top, spacing: 13) {
@@ -35,6 +40,8 @@ struct PanelView: View {
                             if showGemini { Card(tint: Theme.gemini) { geminiBlock(u.gemini.ranges.get(sel)) } }
                             if showGrok   { Card(tint: Theme.grok)   { grokBlock(u.grok.ranges.get(sel), model: u.grok.model) } }
                             if showQoder  { Card(tint: Theme.qoder)  { qoderBlock(u.qoder, u.qoder.ranges.get(sel)) } }
+                            if showHermes { Card(tint: Theme.hermes) { hermesBlock(u.hermes.ranges.get(sel)) } }
+                            if showOpenClaw { Card(tint: Theme.openclaw) { openclawBlock(u.openclaw.ranges.get(sel)) } }
                         }
                         .frame(maxWidth: .infinity)
                     }
@@ -44,6 +51,8 @@ struct PanelView: View {
                     if showGemini { Card(tint: Theme.gemini) { geminiBlock(u.gemini.ranges.get(sel)) } }
                     if showGrok   { Card(tint: Theme.grok)   { grokBlock(u.grok.ranges.get(sel), model: u.grok.model) } }
                     if showQoder  { Card(tint: Theme.qoder)  { qoderBlock(u.qoder, u.qoder.ranges.get(sel)) } }
+                    if showHermes { Card(tint: Theme.hermes) { hermesBlock(u.hermes.ranges.get(sel)) } }
+                    if showOpenClaw { Card(tint: Theme.openclaw) { openclawBlock(u.openclaw.ranges.get(sel)) } }
                 }
             } else {
                 HStack { Spacer(); ProgressView().controlSize(.small); Spacer() }
@@ -52,8 +61,9 @@ struct PanelView: View {
             footer
         }
         .padding(Theme.outerPad)
-        .frame(width: panelWidth)
+        .frame(width: showDashboard ? max(panelWidth, 480) : panelWidth)
         .background(Theme.bg)
+        .rotation3DEffect(.degrees(showDashboard ? 0 : 0), axis: (x: 0, y: 1, z: 0))
         .environment(\.colorScheme, .dark)
     }
 
@@ -75,6 +85,17 @@ struct PanelView: View {
             Text(store.lastUpdated)
                 .font(.system(size: 9.5, design: .monospaced))
                 .foregroundStyle(Theme.tTertiary)
+            Button {
+                withAnimation(.easeInOut(duration: 0.35)) { showDashboard.toggle() }
+            } label: {
+                Image(systemName: showDashboard ? "square.grid.2x2" : "chart.bar")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(showDashboard ? Theme.claude : Theme.tTertiary)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(Color.primary.opacity(0.06)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
             Button { settingsOpen.toggle() } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 11, weight: .medium))
@@ -258,6 +279,61 @@ struct PanelView: View {
         }
     }
 
+    // MARK: - Hermes 卡片(完整:token + cost + 命中率)
+    @ViewBuilder
+    func hermesBlock(_ r: HermesRange) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardHead("Hermes", tint: Theme.hermes, hit: r.hit)
+            CostHeadline(cost: r.cost, caption: "\(sel.label) ≈成本", tint: Theme.hermes)
+            sessionCountRow(r.sessions, tint: Theme.hermes)
+            metricGrid({
+                var items: [Metric] = [
+                    .init("arrow.down", "输入", Fmt.human(r.in)),
+                    .init("arrow.up", "输出", Fmt.human(r.out)),
+                    .init("bolt.fill", "缓存读", Fmt.human(r.cr)),
+                ]
+                if r.reason > 0 { items.append(.init("brain", "推理", Fmt.human(r.reason))) }
+                return items
+            }(), tint: Theme.hermes)
+            disclaimer
+        }
+    }
+
+    // MARK: - OpenClaw 卡片(降级:仅任务计数)
+    @ViewBuilder
+    func openclawBlock(_ r: OpenClawRange) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardHeadPlain("OpenClaw", tint: Theme.openclaw)
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("任务").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+                    Text("\(r.tasks)")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(Theme.tPrimary)
+                }
+                if r.completed > 0 {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("完成").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+                        Text("\(r.completed)")
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .foregroundStyle(.green)
+                    }
+                }
+                if r.failed > 0 {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("失败").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+                        Text("\(r.failed)")
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .foregroundStyle(.red.opacity(0.8))
+                    }
+                }
+                Spacer()
+            }
+            Text("仅任务记录,无 token 数据")
+                .font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
+        }
+    }
+
     // MARK: - 复用片段
     struct Metric { var icon, label, value: String
         init(_ i: String, _ l: String, _ v: String) { icon = i; label = l; value = v } }
@@ -416,6 +492,8 @@ struct PanelView: View {
         }
     }
 
+    @State private var priceUpdating = false
+    @State private var priceResult = ""
     @AppStorage("syncDir") private var syncDir = ""
     @AppStorage("deviceName") private var deviceName = ""
     @AppStorage("autoSync") private var autoSync = false
@@ -430,6 +508,56 @@ struct PanelView: View {
                 settingsRow("Gemini CLI", tint: Theme.gemini, isOn: $showGemini)
                 settingsRow("Grok CLI", tint: Theme.grok, isOn: $showGrok)
                 settingsRow("Qoder", tint: Theme.qoder, isOn: $showQoder)
+                settingsRow("Hermes", tint: Theme.hermes, isOn: $showHermes)
+                settingsRow("OpenClaw", tint: Theme.openclaw, isOn: $showOpenClaw)
+            }
+
+            Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 1)
+
+            // 价格表
+            settingsSection("dollarsign.circle", "价格表") {
+                HStack(spacing: 8) {
+                    Button { runPriceUpdate("--update-prices", "全量更新中…") } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.down.circle").font(.system(size: 9))
+                            Text("全量更新").font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundStyle(Theme.tPrimary)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.primary.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(priceUpdating)
+
+                    Button { runPriceUpdate("--update-unknown", "查漏补缺中…") } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "magnifyingglass.circle").font(.system(size: 9))
+                            Text("查漏补缺").font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundStyle(Theme.tPrimary)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.primary.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(priceUpdating)
+
+                    if priceUpdating { ProgressView().controlSize(.mini) }
+                }
+                .padding(.horizontal, 10).padding(.vertical, 5)
+
+                if !priceResult.isEmpty && !priceUpdating {
+                    Text(priceResult)
+                        .font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
+                        .padding(.horizontal, 10)
+                        .onTapGesture { priceResult = "" }
+                        .onAppear {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+                                priceResult = ""
+                            }
+                        }
+                }
             }
 
             Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 1)
@@ -566,6 +694,44 @@ struct PanelView: View {
                         }
                     }
                     .padding(.horizontal, 10).padding(.vertical, 5)
+
+                    // 添加远程设备
+                    if store.syncEnabled && !syncDir.isEmpty {
+                        Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 1)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("添加远程设备")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Theme.tSecondary)
+                            Text("在远程服务器执行:")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Theme.tTertiary)
+                            HStack {
+                                Text("bash install.sh --repo <仓库> --name <名称>")
+                                    .font(.system(size: 8.5, design: .monospaced))
+                                    .foregroundStyle(Theme.tSecondary)
+                                    .lineLimit(2)
+                                Spacer()
+                                Button {
+                                    let cmd = "bash install.sh --repo <YOUR_REPO> --name <SERVER_NAME>"
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(cmd, forType: .string)
+                                } label: {
+                                    Image(systemName: "doc.on.doc")
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(Theme.tTertiary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(8)
+                            .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.primary.opacity(0.04)))
+
+                            Text("或让远程 Agent 安装 tokei-collector skill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Theme.tTertiary)
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                    }
                 }
             }
         }
@@ -598,6 +764,37 @@ struct PanelView: View {
         let cfg = SyncConfig(device_id: deviceName, sync_dir: syncDir,
                              auto_sync: autoSync, sync_interval: syncInterval)
         store.syncManager.saveConfig(cfg)
+    }
+
+    func runPriceUpdate(_ flag: String, _ msg: String) {
+        priceUpdating = true
+        priceResult = msg
+        DispatchQueue.global(qos: .utility).async {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            proc.arguments = ["python3", DataLoader.scriptPath, flag]
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = Pipe()
+            try? proc.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            DispatchQueue.main.async {
+                priceUpdating = false
+                if flag == "--update-prices" {
+                    priceResult = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                } else {
+                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let count = json["count"] as? Int {
+                        priceResult = count > 0 ? "补全 \(count) 个模型" : "所有模型已匹配 ✓"
+                    } else {
+                        priceResult = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+                store.refresh()
+            }
+        }
     }
 
     func pickSyncDir() {

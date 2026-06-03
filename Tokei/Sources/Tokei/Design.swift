@@ -7,6 +7,8 @@ enum Theme {
     static let gemini = Color(red: 0.62, green: 0.52, blue: 0.92)   // 薰衣草
     static let grok   = Color(red: 0.65, green: 0.68, blue: 0.75)   // 冷灰银
     static let qoder  = Color(red: 0.90, green: 0.75, blue: 0.35)   // 琥珀金
+    static let hermes = Color(red: 0.40, green: 0.82, blue: 0.60)   // 翠绿
+    static let openclaw = Color(red: 0.85, green: 0.45, blue: 0.68) // 玫红
 
     static let panelWidth: CGFloat = 322
     static let cardRadius: CGFloat = 16
@@ -23,9 +25,9 @@ enum Theme {
                        startPoint: .top, endPoint: .bottom)
     }
 
-    static let tPrimary   = Color.white.opacity(0.94)
-    static let tSecondary = Color.white.opacity(0.70)
-    static let tTertiary  = Color.white.opacity(0.45)
+    static let tPrimary   = Color.white.opacity(0.97)
+    static let tSecondary = Color.white.opacity(0.82)
+    static let tTertiary  = Color.white.opacity(0.58)
 }
 
 // 毛玻璃之上的浮起卡片:淡色填充 + 渐变描边 + 柔和投影。

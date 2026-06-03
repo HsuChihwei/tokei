@@ -235,12 +235,62 @@ struct QoderStat: Codable {
     var model: String?
 }
 
+struct HermesRange: Codable {
+    var hit: Double
+    var `in`: Int
+    var out: Int
+    var cr: Int
+    var cw: Int
+    var reason: Int
+    var cost: Double
+    var sessions: Int = 0
+    var models: [HermesModelStat] = []
+}
+struct HermesModelStat: Codable, Identifiable {
+    var name: String; var `in`: Int; var out: Int; var cost: Double
+    var id: String { name }
+}
+struct HermesRanges: Codable {
+    var today, yesterday, week, month, year: HermesRange
+    func get(_ k: RangeKey) -> HermesRange {
+        switch k {
+        case .today: return today; case .yesterday: return yesterday
+        case .week: return week; case .month: return month; case .year: return year
+        }
+    }
+    mutating func set(_ k: RangeKey, _ v: HermesRange) {
+        switch k {
+        case .today: today = v; case .yesterday: yesterday = v
+        case .week: week = v; case .month: month = v; case .year: year = v
+        }
+    }
+}
+struct HermesStat: Codable { var ranges: HermesRanges }
+
+struct OpenClawRange: Codable {
+    var tasks: Int
+    var completed: Int
+    var failed: Int
+}
+struct OpenClawRanges: Codable {
+    var today, yesterday, week, month, year: OpenClawRange
+    func get(_ k: RangeKey) -> OpenClawRange {
+        switch k {
+        case .today: return today; case .yesterday: return yesterday
+        case .week: return week; case .month: return month; case .year: return year
+        }
+    }
+}
+struct OpenClawStat: Codable { var ranges: OpenClawRanges }
+
 struct Usage: Codable {
     var claude: ClaudeStat
     var codex: CodexStat
     var gemini: GeminiStat
     var grok: GrokStat
     var qoder: QoderStat
+    var hermes: HermesStat
+    var openclaw: OpenClawStat
 }
 
 enum Fmt {
