@@ -1,6 +1,14 @@
 import Foundation
 
 final class DataLoader {
+    struct ScriptResult {
+        var stdout: String
+        var stderr: String
+        var exitCode: Int32
+        var elapsed: TimeInterval
+        var timedOut: Bool
+    }
+
     static var scriptPath: String = {
         let userScript = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".tokei/usage.30s.py").path
@@ -39,24 +47,54 @@ final class DataLoader {
     }
 
     static func runScript(args: [String] = ["--json"]) -> Usage? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = ["python3", scriptPath] + args
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = Pipe()
-        do {
-            try proc.run()
-        } catch {
+        let result = runScriptRaw(args: args, timeout: 12)
+        guard !result.timedOut, result.exitCode == 0 else {
+            fputs("Tokei script failed: exit=\(result.exitCode) timeout=\(result.timedOut)\n\(result.stderr)\n", stderr)
             return nil
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
+        let data = Data(result.stdout.utf8)
         do {
             return try JSONDecoder().decode(Usage.self, from: data)
         } catch {
             fputs("Tokei decode error: \(error)\n", stderr)
             return nil
         }
+    }
+
+    static func runScriptRaw(args: [String] = ["--json"], timeout: TimeInterval = 8) -> ScriptResult {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.arguments = ["python3", scriptPath] + args
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+        let started = Date()
+        do {
+            try proc.run()
+        } catch {
+            return ScriptResult(stdout: "", stderr: error.localizedDescription, exitCode: -1,
+                                elapsed: Date().timeIntervalSince(started), timedOut: false)
+        }
+
+        var timedOut = false
+        let killer = DispatchWorkItem {
+            if proc.isRunning {
+                timedOut = true
+                proc.terminate()
+            }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: killer)
+
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        killer.cancel()
+
+        return ScriptResult(stdout: String(data: outData, encoding: .utf8) ?? "",
+                            stderr: String(data: errData, encoding: .utf8) ?? "",
+                            exitCode: proc.terminationStatus,
+                            elapsed: Date().timeIntervalSince(started),
+                            timedOut: timedOut)
     }
 }

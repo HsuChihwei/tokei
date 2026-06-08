@@ -30,6 +30,15 @@ struct PanelView: View {
         (NSScreen.main?.visibleFrame.height ?? 900) - 40
     }
 
+    private var debugSummary: String {
+        guard !debugOutput.isEmpty else { return "" }
+        let lines = debugOutput.components(separatedBy: .newlines)
+        let exit = lines.first(where: { $0.hasPrefix("exit:") }) ?? ""
+        let json = lines.first(where: { $0.hasPrefix("json:") }) ?? ""
+        let errors = lines.first(where: { $0.hasPrefix("errors:") }) ?? ""
+        return [exit, json, errors].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
     var body: some View {
         let w = mode == .cards ? panelWidth : max(panelWidth, 420)
         if scrollable {
@@ -303,21 +312,39 @@ struct PanelView: View {
         VStack(alignment: .leading, spacing: 11) {
             cardHeadPlain("Grok CLI", tint: Theme.grok)
             if r.sessions > 0 {
-                HStack(spacing: 6) {
-                    Image(systemName: "square.stack.3d.up.fill")
-                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.grok)
-                    Text("累计上下文")
-                        .font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
-                    Spacer(minLength: 6)
-                    Text(Fmt.human(r.tokens))
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundStyle(Theme.tPrimary)
-                        .contentTransition(.numericText())
-                    Text("token").font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
-                }
+                CostHeadline(value: Fmt.human(r.ctx_used ?? r.tokens), caption: "\(sel.label) 上下文", tint: Theme.grok)
+                metricGrid({
+                    var items: [Metric] = [
+                        .init("arrow.triangle.2.circlepath", "轮次", "\(r.turns ?? 0)"),
+                        .init("wrench.and.screwdriver", "工具", "\(r.tools ?? 0)"),
+                    ]
+                    if let duration = r.duration, duration > 0 {
+                        items.append(.init("clock", "耗时", Fmt.duration(duration * 1000)))
+                    }
+                    if let ctx = r.ctx, ctx > 0 {
+                        items.append(.init("chart.bar.fill", "窗口", String(format: "%.0f%%", ctx)))
+                    }
+                    if let ttft = r.ttft, ttft > 0 {
+                        items.append(.init("timer", "首字", String(format: "%.1fs", Double(ttft) / 1000)))
+                    }
+                    if let response = r.response, response > 0 {
+                        items.append(.init("speedometer", "响应", String(format: "%.1fs", Double(response) / 1000)))
+                    }
+                    if (r.errors ?? 0) > 0 {
+                        items.append(.init("exclamationmark.triangle", "错误", "\(r.errors ?? 0)"))
+                    }
+                    if (r.cancellations ?? 0) > 0 {
+                        items.append(.init("xmark.circle", "取消", "\(r.cancellations ?? 0)"))
+                    }
+                    return items
+                }(), tint: Theme.grok)
                 if let model, !model.isEmpty {
                     modelBadge(model, tint: Theme.grok)
                 }
+                Text("Grok CLI 本地日志没有保存 input/output usage,这里展示上下文与执行指标。")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(Theme.tTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 emptyHint
             }
@@ -459,7 +486,7 @@ struct PanelView: View {
         ]
         let inactive = names.filter(\.0).map(\.1)
         if !inactive.isEmpty {
-            Text(inactive.joined(separator: " · ") + " 暂无数据")
+            Text("未检测到本地数据: " + inactive.joined(separator: " · "))
                 .font(.system(size: 9))
                 .foregroundStyle(Theme.tTertiary)
                 .frame(maxWidth: .infinity)
@@ -644,6 +671,9 @@ struct PanelView: View {
 
     @State private var priceUpdating = false
     @State private var priceResult = ""
+    @State private var debugRunning = false
+    @State private var debugOutput = ""
+    @State private var debugExpanded = false
     @AppStorage("syncDir") private var syncDir = ""
     @AppStorage("deviceName") private var deviceName = ""
     @AppStorage("autoSync") private var autoSync = false
@@ -710,6 +740,78 @@ struct PanelView: View {
                                 priceResult = ""
                             }
                         }
+                }
+            }
+
+            Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 1)
+
+            settingsSection("stethoscope", "诊断") {
+                HStack(spacing: 8) {
+                    Button { toggleDiagnostics() } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: debugOutput.isEmpty || debugRunning ? "ladybug" : "chevron.up.circle")
+                                .font(.system(size: 9))
+                            Text(debugButtonTitle)
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundStyle(Theme.tPrimary)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.primary.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(debugRunning)
+
+                    if debugRunning { ProgressView().controlSize(.mini) }
+
+                    Spacer()
+
+                    if !debugOutput.isEmpty {
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(debugOutput, forType: .string)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Theme.tTertiary)
+                        }
+                        .buttonStyle(.plain)
+                        .tip("复制诊断")
+                    }
+                }
+                .padding(.horizontal, 10).padding(.vertical, 5)
+
+                if !debugOutput.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.18)) { debugExpanded.toggle() }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: debugExpanded ? "chevron.down" : "chevron.right")
+                                    .font(.system(size: 8, weight: .semibold))
+                                Text(debugSummary)
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .lineLimit(1)
+                                Spacer()
+                            }
+                            .foregroundStyle(Theme.tSecondary)
+                        }
+                        .buttonStyle(.plain)
+
+                        if debugExpanded {
+                            Text(debugOutput)
+                                .font(.system(size: 8.5, design: .monospaced))
+                                .foregroundStyle(Theme.tSecondary)
+                                .lineLimit(16)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.05)))
+                    .padding(.horizontal, 10)
                 }
             }
 
@@ -1022,6 +1124,78 @@ struct PanelView: View {
                 store.refresh()
             }
         }
+    }
+
+    private var debugButtonTitle: String {
+        if debugRunning { return "检查中…" }
+        return debugOutput.isEmpty ? "运行诊断" : "收起诊断"
+    }
+
+    func toggleDiagnostics() {
+        if !debugRunning && !debugOutput.isEmpty {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                debugOutput = ""
+                debugExpanded = false
+            }
+            return
+        }
+        runDiagnostics()
+    }
+
+    func runDiagnostics() {
+        debugRunning = true
+        debugOutput = "running..."
+        debugExpanded = false
+        DispatchQueue.global(qos: .utility).async {
+            let result = DataLoader.runScriptRaw(args: ["--json"], timeout: 8)
+            let report = Self.formatDiagnostics(result)
+            DispatchQueue.main.async {
+                debugRunning = false
+                debugOutput = report
+            }
+        }
+    }
+
+    static func formatDiagnostics(_ result: DataLoader.ScriptResult) -> String {
+        let fm = FileManager.default
+        let script = DataLoader.scriptPath
+        let exists = fm.fileExists(atPath: script)
+        let size = ((try? fm.attributesOfItem(atPath: script)[.size] as? NSNumber)?.intValue) ?? 0
+        var lines = [
+            "script: \(script)",
+            "exists: \(exists) size: \(size)B",
+            String(format: "exit: %d timeout: %@ elapsed: %.2fs",
+                   result.exitCode, result.timedOut ? "yes" : "no", result.elapsed),
+            "stdout: \(result.stdout.count)B stderr: \(result.stderr.count)B",
+        ]
+
+        if let data = result.stdout.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let tools = ["claude", "codex", "gemini", "grok", "qoder", "hermes", "openclaw", "opencode"]
+                .filter { json[$0] != nil }
+                .joined(separator: ",")
+            lines.append("json: ok tools: \(tools)")
+            if let pricing = json["_pricing"] as? [String: Any] {
+                lines.append("pricing: \(pricing["count"] ?? "?") \(pricing["updated_at"] ?? "")")
+            }
+            if let errors = json["_errors"] as? [String: Any], !errors.isEmpty {
+                lines.append("errors:")
+                for key in errors.keys.sorted() {
+                    lines.append("- \(key): \(errors[key] ?? "")")
+                }
+            } else {
+                lines.append("errors: none")
+            }
+        } else if !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.append("json: invalid")
+            lines.append(result.stdout.prefix(600).description)
+        }
+
+        if !result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.append("stderr:")
+            lines.append(result.stderr.prefix(600).description)
+        }
+        return lines.joined(separator: "\n")
     }
 
     static var skillPath: String {

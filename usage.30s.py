@@ -271,7 +271,10 @@ def _empty_gemini():
 
 
 def _empty_grok():
-    ranges = {k: {"tokens": 0, "sessions": set()} for k in RANGE_KEYS}
+    ranges = {k: {"tokens": 0, "sessions": set(), "turns": 0, "tools": 0,
+                  "duration": 0, "ctx_used": 0, "ctx_window": 0, "errors": 0,
+                  "cancellations": 0, "ttft_sum": 0, "response_sum": 0, "latency_count": 0}
+              for k in RANGE_KEYS}
     return {"ranges": ranges, "model": None}
 
 
@@ -312,6 +315,8 @@ def scan_claude(bounds, cache):
     B = {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "models": {}, "sessions": set()}
          for k in RANGE_KEYS}
     cur_file, cur_mtime = None, -1.0
+    if not os.path.isdir(CLAUDE_DIR):
+        return {"ranges": B, "cur": {"in": 0, "out": 0, "cr": 0, "cw": 0, "name": "-"}}
 
     today_d = bounds["today"].date()
     yest_d = bounds["yesterday"].date()
@@ -451,6 +456,8 @@ def scan_codex(bounds, cache):
     B = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0.0, "sessions": set()}
          for k in RANGE_KEYS}
     cx_base = _raw_price("openai/gpt-5.5")
+    if not os.path.isdir(CODEX_DIR):
+        return {"ranges": B, "cur_total": None, "limits": None, "plan": None}
 
     today_d = bounds["today"].date()
     yest_d = bounds["yesterday"].date()
@@ -587,6 +594,8 @@ def scan_codex(bounds, cache):
 # assistant 行 type=="gemini",tokens={input,output,cached,thoughts,total}
 # (total=input+output+thoughts,cached⊂input)。增量快照共用 sessionId,按 lastUpdated 去重。
 def scan_gemini(bounds):
+    if not os.path.isdir(GEMINI_DIR):
+        return _empty_gemini()
     scan_from = min(bounds["yesterday"], bounds["week"], bounds["month"], bounds["year"]).timestamp()
     best = {}  # sessionId -> (lastUpdated, data),同 id 取最新快照
     for f in glob.glob(os.path.join(GEMINI_DIR, "*", "chats", "session-*.json")):
@@ -643,13 +652,18 @@ def scan_gemini(bounds):
 
 
 # ---------- Grok CLI ----------
-# 日志:~/.grok/sessions/<cwd>/<uuid>/{summary.json,updates.jsonl}
-# 无输入/输出拆分,只有 updates.jsonl 里 _meta.totalTokens(上下文窗口累计,单调递增)。
-# 取其最大值作"上下文规模"代理,非真实消耗量,故降级展示、不估成本。
+# 日志:~/.grok/sessions/<cwd>/<uuid>/{summary.json,signals.json,events.jsonl,updates.jsonl}
+# 当前 Grok CLI 本地日志未落 prompt_tokens/completion_tokens usage;官方 API 响应有 usage。
+# 这里展示 Grok 本地可验证的上下文、轮次、工具、耗时和延迟,不估真实消耗成本。
 def scan_grok(bounds):
-    B = {k: {"tokens": 0, "sessions": set()} for k in RANGE_KEYS}
+    B = {k: {"tokens": 0, "sessions": set(), "turns": 0, "tools": 0,
+             "duration": 0, "ctx_used": 0, "ctx_window": 0, "errors": 0,
+             "cancellations": 0, "ttft_sum": 0, "response_sum": 0, "latency_count": 0}
+         for k in RANGE_KEYS}
     latest_mtime = -1.0
     latest_model = None
+    if not os.path.isdir(GROK_DIR):
+        return {"ranges": B, "model": None}
     for sm in glob.glob(os.path.join(GROK_DIR, "*", "*", "summary.json")):
         try:
             mtime = os.path.getmtime(sm)
@@ -669,6 +683,14 @@ def scan_grok(bounds):
         ks = classify(dt.astimezone(), bounds)
         if not ks:
             continue
+        sig = {}
+        sj = os.path.join(os.path.dirname(sm), "signals.json")
+        try:
+            with open(sj, "r", encoding="utf-8", errors="ignore") as fh:
+                sig = json.load(fh)
+        except Exception:
+            sig = {}
+
         mx = 0
         uj = os.path.join(os.path.dirname(sm), "updates.jsonl")
         try:
@@ -685,10 +707,56 @@ def scan_grok(bounds):
                         mx = int(tt)
         except OSError:
             pass
+
+        event_turns = event_tools = event_duration = event_errors = event_cancellations = 0
+        ej = os.path.join(os.path.dirname(sm), "events.jsonl")
+        try:
+            with open(ej, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    try:
+                        e = json.loads(line)
+                    except Exception:
+                        continue
+                    typ = e.get("type")
+                    if typ == "turn_started":
+                        event_turns += 1
+                    elif typ == "tool_completed":
+                        event_tools += 1
+                        event_duration += int(e.get("duration_ms") or 0)
+                        if e.get("outcome") not in (None, "success"):
+                            event_errors += 1
+                    elif typ == "turn_ended" and e.get("outcome") not in (None, "completed"):
+                        event_cancellations += 1
+        except OSError:
+            pass
+
+        turns = int(sig.get("turnCount") or event_turns or 0)
+        tools = int(sig.get("toolCallCount") or event_tools or 0)
+        duration = int(sig.get("sessionDurationSeconds") or 0)
+        ctx_used = int(sig.get("contextTokensUsed") or mx or 0)
+        ctx_window = int(sig.get("contextWindowTokens") or 0)
+        errors = int(sig.get("errorCount") or 0) + int(sig.get("toolFailureCount") or event_errors or 0)
+        cancellations = int(sig.get("cancellationCount") or event_cancellations or 0)
+        latency_count = int(sig.get("latencySampleCount") or turns or 0)
+        ttft_sum = int(sig.get("avgTimeToFirstTokenMs") or 0) * latency_count
+        response_sum = int(sig.get("avgResponseTimeMs") or 0) * latency_count
+        token_proxy = ctx_used or mx
+
         sid = (s.get("info") or {}).get("id") or sm
         for k in ks:
-            B[k]["tokens"] += mx
-            B[k]["sessions"].add(sid)
+            b = B[k]
+            b["tokens"] += token_proxy
+            b["sessions"].add(sid)
+            b["turns"] += turns
+            b["tools"] += tools
+            b["duration"] += duration
+            b["ctx_used"] += ctx_used
+            b["ctx_window"] += ctx_window
+            b["errors"] += errors
+            b["cancellations"] += cancellations
+            b["ttft_sum"] += ttft_sum
+            b["response_sum"] += response_sum
+            b["latency_count"] += latency_count
     return {"ranges": B, "model": latest_model}
 
 
@@ -1178,7 +1246,16 @@ def compute():
                 "models": models, "sessions": len(b["sessions"])}
 
     def grok_range(b):
-        return {"tokens": b["tokens"], "sessions": len(b["sessions"])}
+        latency_count = b.get("latency_count", 0)
+        ctx_window = b.get("ctx_window", 0)
+        ctx_pct = (b.get("ctx_used", 0) / ctx_window * 100) if ctx_window else 0.0
+        return {"tokens": b.get("tokens", 0), "sessions": len(b.get("sessions", [])),
+                "turns": b.get("turns", 0), "tools": b.get("tools", 0),
+                "duration": b.get("duration", 0), "ctx_used": b.get("ctx_used", 0),
+                "ctx_window": ctx_window, "ctx": ctx_pct,
+                "errors": b.get("errors", 0), "cancellations": b.get("cancellations", 0),
+                "ttft": int(b.get("ttft_sum", 0) / latency_count) if latency_count else 0,
+                "response": int(b.get("response_sum", 0) / latency_count) if latency_count else 0}
 
     def qoder_range(b):
         ctx_count = b.get("ctx_count", 0)

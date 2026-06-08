@@ -167,6 +167,16 @@ struct GeminiStat: Codable {
 struct GrokRange: Codable {
     var tokens: Int
     var sessions: Int = 0
+    var turns: Int?
+    var tools: Int?
+    var duration: Int?
+    var ctx_used: Int?
+    var ctx_window: Int?
+    var ctx: Double?
+    var errors: Int?
+    var cancellations: Int?
+    var ttft: Int?
+    var response: Int?
 }
 
 struct GrokRanges: Codable {
