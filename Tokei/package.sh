@@ -46,15 +46,72 @@ codesign --force --deep --sign - "$APP" 2>/dev/null || true
 xattr -cr "$APP" 2>/dev/null || true
 echo "Built: $(pwd)/$APP"
 
-# 打包 DMG
+# 打包 DMG（含自定义背景 + 图标布局）
 if command -v hdiutil &>/dev/null; then
     DMG="Tokei.dmg"
     rm -f "$DMG"
-    TMP_DMG="/tmp/tokei_dmg_$$"
-    mkdir -p "$TMP_DMG"
-    cp -R "$APP" "$TMP_DMG/"
-    ln -s /Applications "$TMP_DMG/Applications"
-    hdiutil create -volname "Tokei" -srcfolder "$TMP_DMG" -ov -format UDZO "$DMG" 2>/dev/null
-    rm -rf "$TMP_DMG"
+
+    # 生成背景图
+    BG_IMG="dmg_background.png"
+    if [ ! -f "$BG_IMG" ] && command -v python3 &>/dev/null; then
+        python3 dmg_bg.py 2>/dev/null || true
+    fi
+
+    TMP_DMG="/tmp/tokei_rw_$$.dmg"
+    MOUNT_DIR="/tmp/tokei_mount_$$"
+
+    # 创建可读写 DMG
+    mkdir -p "$MOUNT_DIR"
+    cp -R "$APP" "$MOUNT_DIR/"
+    ln -s /Applications "$MOUNT_DIR/Applications"
+
+    # 复制背景图到隐藏目录
+    if [ -f "$BG_IMG" ]; then
+        mkdir -p "$MOUNT_DIR/.background"
+        cp "$BG_IMG" "$MOUNT_DIR/.background/bg.png"
+    fi
+
+    hdiutil create -volname "Tokei" -srcfolder "$MOUNT_DIR" -ov -format UDRW "$TMP_DMG" 2>/dev/null
+    rm -rf "$MOUNT_DIR"
+
+    # 挂载并用 AppleScript 设置窗口样式
+    DEVICE=$(hdiutil attach -readwrite -noverify "$TMP_DMG" | grep '/Volumes/Tokei' | awk '{print $1}')
+    sleep 1
+
+    # 隐藏 dot 文件夹
+    SetFile -a V /Volumes/Tokei/.background 2>/dev/null || true
+    SetFile -a V /Volumes/Tokei/.fseventsd 2>/dev/null || true
+
+    if [ -f "/Volumes/Tokei/.background/bg.png" ]; then
+        osascript <<'APPLE'
+tell application "Finder"
+    tell disk "Tokei"
+        open
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        set bounds of container window to {200, 120, 860, 520}
+        set theViewOptions to icon view options of container window
+        set arrangement of theViewOptions to not arranged
+        set icon size of theViewOptions to 80
+        set background picture of theViewOptions to file ".background:bg.png"
+        set position of item "Tokei.app" of container window to {150, 175}
+        set position of item "Applications" of container window to {510, 175}
+        close
+        open
+        delay 1
+        close
+    end tell
+end tell
+APPLE
+    fi
+
+    sync
+    hdiutil detach "$DEVICE" 2>/dev/null
+    sleep 1
+
+    # 转为压缩只读 DMG
+    hdiutil convert "$TMP_DMG" -format UDZO -o "$DMG" 2>/dev/null
+    rm -f "$TMP_DMG"
     echo "DMG: $(pwd)/$DMG"
 fi
