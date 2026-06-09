@@ -79,15 +79,13 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **8 款 AI 编程
 
 ## 快速开始
 
-```bash
-# 下载安装
-curl -LO https://dl.lanshuagent.com/tokei/Tokei-v8.dmg
-open Tokei.dmg
-# 拖动 Tokei.app 到应用程序文件夹，然后解除隔离：
-sudo xattr -rd com.apple.quarantine /Applications/Tokei.app
-```
+1. 从 [GitHub Releases](https://github.com/cclank/tokei/releases/latest) 下载最新 DMG
+2. 打开 DMG，将 Tokei.app 拖入 Applications 文件夹
+3. 首次打开如被 macOS 拦截，在终端运行：`sudo xattr -rd com.apple.quarantine /Applications/Tokei.app`
+4. 打开 Tokei 即可
 
-或从源码构建：
+<details>
+<summary>从源码构建</summary>
 
 ```bash
 git clone https://github.com/cclank/tokei.git
@@ -95,6 +93,7 @@ cd tokei/Tokei
 bash package.sh
 open Tokei.app
 ```
+</details>
 
 ## 多设备同步配置
 
@@ -127,6 +126,25 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 | OpenCode | `~/.opencode/sessions/*.json` |
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |
 
+## 对比 CodexBar
+
+| 功能 | Tokei | [CodexBar](https://github.com/steipete/CodexBar) |
+|------|:-----:|:---------:|
+| 支持工具 | 8 | 40+ |
+| Token 级用量分析 | ✅ | — |
+| 成本估算（317 模型） | ✅ | 部分 |
+| 数据面板（图表 + 热力图） | ✅ | — |
+| 多时间维度 | 6 个 | — |
+| 项目级追踪 | ✅ | — |
+| 多设备同步 | ✅ | — |
+| 年度回顾 | ✅ | — |
+| 防休眠 / 久坐提醒 | ✅ | — |
+| 需要联网 | 否 | 是 |
+| 需要登录 | 否 | 是 |
+| 数据来源 | 本地日志 | 远程 API |
+
+> CodexBar 在提供商覆盖和配额可见性上表现出色。Tokei 更深入——Token 级分析、成本趋势、项目维度拆分、跨设备同步——全部无需登录。
+
 ## Star History
 
 <p align="center">
@@ -143,7 +161,7 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 
 Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **8 AI coding tools** in real-time — all from local log files, with zero network traffic.
 
-**Features:** Real-time monitoring (30s refresh) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Sit reminder · Privacy-first (local logs only)
+**Features:** Real-time monitoring (30s refresh) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local logs only) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
 **Supported tools:** Claude Code, Codex CLI, Gemini CLI, Grok CLI, Aider, OpenClaw, OpenCode, Qoder
 
