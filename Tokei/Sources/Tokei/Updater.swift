@@ -15,7 +15,7 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
         }
     }
 
-    static let releaseTag = "v1.0.0"
+    static let releaseTag = "v1.0.1"
     @Published var state: State = .idle
 
     private let apiURL = URL(string: "https://api.github.com/repos/cclank/tokei/releases/latest")!
