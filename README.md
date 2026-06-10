@@ -123,7 +123,7 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 | Grok CLI | `~/.grok/sessions/YYYY/MM/DD/*.jsonl` |
 | Aider | `~/.aider/analytics/analytics.jsonl` |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + SQLite |
-| OpenCode | `~/.opencode/sessions/*.json` |
+| OpenCode | `~/.local/share/opencode/opencode.db` (v2 SQLite) + `~/.local/share/opencode/storage/message/` (v1 JSON) |
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |
 
 ### 自定义日志路径
@@ -139,6 +139,7 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
     "grok": "~/.grok/sessions",
     "hermes": "~/.hermes/state.db",
     "opencode": "~/.local/share/opencode/storage/message",
+    "opencode_db": "~/.local/share/opencode/opencode.db",
     "openclaw_db": "~/.openclaw/tasks/runs.sqlite",
     "openclaw_agents": "~/.openclaw/agents",
     "qoder_db": "~/Library/Application Support/QoderWork/data/agents.db",
