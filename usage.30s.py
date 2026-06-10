@@ -17,15 +17,38 @@ import re
 from datetime import datetime, timedelta, date
 
 HOME = os.path.expanduser("~")
-CLAUDE_DIR = os.path.join(HOME, ".claude", "projects")
-CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
-GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
-GROK_DIR = os.path.join(HOME, ".grok", "sessions")
-QODER_DIR = os.path.join(HOME, ".qoder")
-HERMES_DB = os.path.join(HOME, ".hermes", "state.db")
-OPENCODE_DIR = os.path.join(HOME, ".local", "share", "opencode", "storage", "message")
-OPENCLAW_DB = os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite")
-OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
+_TOKEI_CONFIG = os.path.join(HOME, ".tokei", "config.json")
+
+
+def _load_tokei_config():
+    try:
+        with open(_TOKEI_CONFIG) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+_CFG = _load_tokei_config() or {}
+_PATHS = _CFG.get("paths", {})
+
+
+def _cfg_path(key, default):
+    """从 config.json 的 paths 段读取覆盖值;无覆盖则使用 default。支持 ~ 展开。"""
+    val = _PATHS.get(key)
+    if val and isinstance(val, str):
+        return os.path.expanduser(val)
+    return default
+
+
+CLAUDE_DIR = _cfg_path("claude", os.path.join(HOME, ".claude", "projects"))
+CODEX_DIR = _cfg_path("codex", os.path.join(HOME, ".codex", "sessions"))
+GEMINI_DIR = _cfg_path("gemini", os.path.join(HOME, ".gemini", "tmp"))
+GROK_DIR = _cfg_path("grok", os.path.join(HOME, ".grok", "sessions"))
+QODER_DIR = _cfg_path("qoder", os.path.join(HOME, ".qoder"))
+HERMES_DB = _cfg_path("hermes", os.path.join(HOME, ".hermes", "state.db"))
+OPENCODE_DIR = _cfg_path("opencode", os.path.join(HOME, ".local", "share", "opencode", "storage", "message"))
+OPENCLAW_DB = _cfg_path("openclaw_db", os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite"))
+OPENCLAW_AGENTS = _cfg_path("openclaw_agents", os.path.join(HOME, ".openclaw", "agents"))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.join(HOME, ".tokei")
@@ -772,7 +795,7 @@ def scan_grok(bounds):
 # ---------- Qoder ----------
 # QoderWork SQLite:~/Library/Application Support/QoderWork/data/agents.db
 # messages 表 metadata 含 durationMs / contextUsageRatio(token 字段目前全 0)。
-_QODER_DB = os.path.join(HOME, "Library", "Application Support", "QoderWork", "data", "agents.db")
+_QODER_DB = _cfg_path("qoder_db", os.path.join(HOME, "Library", "Application Support", "QoderWork", "data", "agents.db"))
 
 
 def scan_qoder(bounds, cache):
@@ -852,7 +875,7 @@ def scan_qoder(bounds, cache):
 
     # 从 QoderWork 日志提取最新 credit 额度
     quota = None
-    qw_logs = os.path.join(HOME, "Library", "Application Support", "QoderWork", "logs")
+    qw_logs = _cfg_path("qoder_logs", os.path.join(HOME, "Library", "Application Support", "QoderWork", "logs"))
     if os.path.isdir(qw_logs):
         log_dirs = sorted(glob.glob(os.path.join(qw_logs, "2*")), reverse=True)
         for ld in log_dirs[:2]:
@@ -1218,8 +1241,9 @@ def fmt_reset(epoch):
 
 # ---------- Claude 套餐用量(读 Claude Desktop 的 Chromium HTTP 缓存) ----------
 # 数据来自桌面应用每 ~10min 轮询 /usage 的响应(zstd 压缩),纯本地只读。
-CLAUDE_CACHE = os.path.join(
-    HOME, "Library", "Application Support", "Claude", "Cache", "Cache_Data"
+CLAUDE_CACHE = _cfg_path(
+    "claude_cache",
+    os.path.join(HOME, "Library", "Application Support", "Claude", "Cache", "Cache_Data"),
 )
 
 
@@ -1457,17 +1481,6 @@ def compute():
     if errors:
         result["_errors"] = errors
     return result
-
-
-_TOKEI_CONFIG = os.path.join(HOME, ".tokei", "config.json")
-
-
-def _load_tokei_config():
-    try:
-        with open(_TOKEI_CONFIG) as f:
-            return json.load(f)
-    except Exception:
-        return None
 
 
 def main_json():
