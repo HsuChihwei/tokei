@@ -126,6 +126,30 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 | OpenCode | `~/.opencode/sessions/*.json` |
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |
 
+### 自定义日志路径
+
+默认日志路径可通过 `~/.tokei/config.json` 的 `paths` 字段覆盖，支持 `~` 展开：
+
+```json
+{
+  "paths": {
+    "claude": "~/my-cloud/claude/projects",
+    "codex": "/Volumes/data/.codex/sessions",
+    "gemini": "~/.gemini/tmp",
+    "grok": "~/.grok/sessions",
+    "hermes": "~/.hermes/state.db",
+    "opencode": "~/.local/share/opencode/storage/message",
+    "openclaw_db": "~/.openclaw/tasks/runs.sqlite",
+    "openclaw_agents": "~/.openclaw/agents",
+    "qoder_db": "~/Library/Application Support/QoderWork/data/agents.db",
+    "qoder_logs": "~/Library/Application Support/QoderWork/logs",
+    "claude_cache": "~/Library/Application Support/Claude/Cache/Cache_Data"
+  }
+}
+```
+
+只需填写需要覆盖的字段，未指定的使用默认值。适用于日志目录通过网盘同步或自定义安装路径的场景。
+
 ## 对比 CodexBar
 
 | 功能 | Tokei | [CodexBar](https://github.com/steipete/CodexBar) |
