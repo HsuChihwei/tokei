@@ -47,6 +47,7 @@ GROK_DIR = _cfg_path("grok", os.path.join(HOME, ".grok", "sessions"))
 QODER_DIR = _cfg_path("qoder", os.path.join(HOME, ".qoder"))
 HERMES_DB = _cfg_path("hermes", os.path.join(HOME, ".hermes", "state.db"))
 OPENCODE_DIR = _cfg_path("opencode", os.path.join(HOME, ".local", "share", "opencode", "storage", "message"))
+OPENCODE_DB = _cfg_path("opencode_db", os.path.join(HOME, ".local", "share", "opencode", "opencode.db"))
 OPENCLAW_DB = _cfg_path("openclaw_db", os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite"))
 OPENCLAW_AGENTS = _cfg_path("openclaw_agents", os.path.join(HOME, ".openclaw", "agents"))
 
@@ -1147,15 +1148,92 @@ def scan_openclaw(bounds, cache):
 
 
 # ---------- OpenCode ----------
-# JSON 文件: ~/.local/share/opencode/storage/message/<session>/msg_*.json
-# 每条 assistant 消息有 tokens{input,output,reasoning,cache{read,write}} + cost + modelID。
+# SQLite (v2): ~/.local/share/opencode/opencode.db  — message 表存每条消息 token + model
+# JSON  (v1): ~/.local/share/opencode/storage/message/<session>/msg_*.json
 def scan_opencode(bounds, cache):
-    fc = cache.setdefault("opencode", {})
     B = {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0.0,
              "sessions": set(), "models": {}} for k in RANGE_KEYS}
-    if not os.path.isdir(OPENCODE_DIR):
-        return {"ranges": B}
+    if os.path.isfile(OPENCODE_DB):
+        _scan_opencode_db(B, cache, bounds)
+    elif os.path.isdir(OPENCODE_DIR):
+        _scan_opencode_json(B, cache, bounds)
+    return {"ranges": B}
 
+
+def _scan_opencode_db(B, cache, bounds):
+    import sqlite3 as _sq
+    fc = cache.setdefault("opencode", {})
+    try:
+        sig = f"{os.path.getmtime(OPENCODE_DB)}:{os.path.getsize(OPENCODE_DB)}"
+    except OSError:
+        return
+    if fc.get("_db_sig") == sig:
+        days = fc.get("_db_days", {})
+    else:
+        days = {}
+        try:
+            conn = _sq.connect(f"file:{OPENCODE_DB}?mode=ro", uri=True)
+            for row in conn.execute("""
+                SELECT date(time_created/1000,'unixepoch','localtime') as day,
+                       session_id,
+                       COALESCE(json_extract(data,'$.modelID'), '') as model,
+                       COALESCE(SUM(json_extract(data,'$.tokens.input')), 0),
+                       COALESCE(SUM(json_extract(data,'$.tokens.output')), 0),
+                       COALESCE(SUM(json_extract(data,'$.tokens.reasoning')), 0),
+                       COALESCE(SUM(json_extract(data,'$.tokens.cache.read')), 0),
+                       COALESCE(SUM(json_extract(data,'$.tokens.cache.write')), 0),
+                       COALESCE(SUM(json_extract(data,'$.cost')), 0)
+                FROM message
+                WHERE json_extract(data,'$.role') = 'assistant'
+                GROUP BY day, session_id, json_extract(data,'$.modelID')
+            """):
+                dk, sid, model, ti, to_, tr, tcr, tcw, cost = row
+                if not dk:
+                    continue
+                d = days.setdefault(dk, {"in": 0, "out": 0, "cr": 0, "cw": 0,
+                                          "reason": 0, "cost": 0.0,
+                                          "sessions": set(), "models": {}})
+                d["in"] += int(ti); d["out"] += int(to_); d["reason"] += int(tr)
+                d["cr"] += int(tcr); d["cw"] += int(tcw); d["cost"] += float(cost)
+                d["sessions"].add(sid)
+                if model:
+                    mm = d["models"].setdefault(model, {"in": 0, "out": 0, "cost": 0.0})
+                    mm["in"] += int(ti); mm["out"] += int(to_); mm["cost"] += float(cost)
+            conn.close()
+        except Exception:
+            pass
+        fc["_db_sig"] = sig
+        fc["_db_days"] = days
+
+    today_d = bounds["today"].date()
+    yest_d = bounds["yesterday"].date()
+    week_d = bounds["week"].date()
+    month_d = bounds["month"].date()
+    year_d = bounds["year"].date()
+    for dk, day in days.items():
+        try:
+            dd = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        ks = []
+        if dd == today_d: ks.append("today")
+        if dd == yest_d: ks.append("yesterday")
+        if dd >= week_d: ks.append("week")
+        if dd >= month_d: ks.append("month")
+        if dd >= year_d: ks.append("year")
+        for k in ks:
+            b = B[k]
+            b["in"] += day["in"]; b["out"] += day["out"]
+            b["cr"] += day["cr"]; b["cw"] += day["cw"]
+            b["reason"] += day["reason"]; b["cost"] += day["cost"]
+            b["sessions"].update(day["sessions"])
+            for mn, mv in day["models"].items():
+                mm = b["models"].setdefault(mn, {"in": 0, "out": 0, "cost": 0.0})
+                mm["in"] += mv["in"]; mm["out"] += mv["out"]; mm["cost"] += mv["cost"]
+
+
+def _scan_opencode_json(B, cache, bounds):
+    fc = cache.setdefault("opencode_json", {})
     today_d = bounds["today"].date()
     yest_d = bounds["yesterday"].date()
     week_d = bounds["week"].date()
@@ -1229,7 +1307,6 @@ def scan_opencode(bounds, cache):
 
     for p in stale:
         fc.pop(p, None)
-    return {"ranges": B}
 
 
 def fmt_reset(epoch):
