@@ -132,54 +132,50 @@ struct DashboardView: View {
     // MARK: - Daily Cost Chart
 
     var dailyCostChart: some View {
-        let n = min(chartDays, daily.count)
-        let slice = Array(daily.suffix(n))
-        let maxCost = slice.map(\.total).max() ?? 1
-        return VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Text("每日成本").font(.system(size: 13, weight: .bold))
-                Spacer()
-                Picker("", selection: $chartDays) {
-                    Text("14天").tag(14); Text("30天").tag(30)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 100)
-                .controlSize(.mini)
-            }
-            HStack(alignment: .bottom, spacing: 2) {
-                ForEach(slice) { d in
-                    VStack(spacing: 3) {
-                        let h = maxCost > 0 ? CGFloat(d.total / maxCost) * 68 : 0
-                        ZStack(alignment: .bottom) {
-                            RoundedRectangle(cornerRadius: 2, style: .continuous)
-                                .fill(Theme.codex.opacity(0.55))
-                                .frame(width: 8, height: max(2, h))
-                            RoundedRectangle(cornerRadius: 2, style: .continuous)
-                                .fill(Theme.claude)
-                                .frame(width: 8,
-                                       height: maxCost > 0
-                                           ? max(0, CGFloat(d.claude / maxCost) * 68)
-                                           : 0)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("每日成本").font(.system(size: 13, weight: .bold))
+            if daily.isEmpty {
+                Text("暂无数据").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+            } else {
+                let n = min(chartDays, daily.count)
+                let slice = Array(daily.suffix(n))
+                let maxCost = slice.map(\.total).max() ?? 1
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .bottom, spacing: 3) {
+                        ForEach(slice) { d in
+                            let ratio = maxCost > 0 ? d.total / maxCost : 0
+                            let barH = max(2, CGFloat(ratio) * 60)
+                            VStack(spacing: 2) {
+                                Text(String(format: "$%.1f", d.total))
+                                    .font(.system(size: 7, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(Theme.tTertiary)
+                                Rectangle()
+                                    .fill(Theme.claude)
+                                    .frame(width: 14, height: barH)
+                                    .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
+                                Text(String(d.date.suffix(2)))
+                                    .font(.system(size: 7, design: .monospaced))
+                                    .foregroundStyle(Theme.tTertiary)
+                            }
                         }
-                        .frame(height: 68, alignment: .bottom)
-                        .help("\(d.date)\nClaude: $\(String(format: "%.2f", d.claude))\nCodex: $\(String(format: "%.2f", d.codex))\nTotal: $\(String(format: "%.2f", d.total))")
-                        Text(String(d.date.suffix(2)))
-                            .font(.system(size: 7, design: .monospaced))
-                            .foregroundStyle(Theme.tTertiary)
+                    }
+                    .padding(.vertical, 2)
+                }
+                HStack {
+                    Picker("", selection: $chartDays) {
+                        Text("14天").tag(14); Text("30天").tag(30)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 100)
+                    .controlSize(.mini)
+                    Spacer()
+                    HStack(spacing: 10) {
+                        HStack(spacing: 3) {
+                            Circle().fill(Theme.claude).frame(width: 5, height: 5)
+                            Text("Claude").font(.system(size: 8)).foregroundStyle(Theme.tTertiary)
+                        }
                     }
                 }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 10) {
-                HStack(spacing: 4) {
-                    Circle().fill(Theme.claude).frame(width: 6, height: 6)
-                    Text("Claude").font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
-                }
-                HStack(spacing: 4) {
-                    Circle().fill(Theme.codex.opacity(0.55)).frame(width: 6, height: 6)
-                    Text("Codex").font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
-                }
-                Spacer()
             }
         }
     }
@@ -217,24 +213,8 @@ struct DashboardView: View {
         return VStack(alignment: .leading, spacing: 9) {
             Text("工具占比").font(.system(size: 13, weight: .bold))
             if tools.isEmpty {
-                Text("暂无数据")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Theme.tTertiary)
+                Text("暂无数据").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
             } else {
-                HStack(spacing: 3) {
-                    GeometryReader { geo in
-                        HStack(spacing: 2) {
-                            ForEach(tools, id: \.name) { t in
-                                let pct = total > 0 ? CGFloat(t.tokens) / CGFloat(total) : 0
-                                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                                    .fill(t.tint)
-                                    .frame(width: max(4, geo.size.width * pct - 2))
-                                    .help("\(t.name): \(String(format: "%.1f", Double(t.tokens) / Double(total) * 100))%")
-                            }
-                        }
-                    }
-                    .frame(height: 8)
-                }
                 VStack(spacing: 5) {
                     ForEach(tools, id: \.name) { t in
                         let pct = total > 0 ? Double(t.tokens) / Double(total) * 100 : 0
@@ -534,9 +514,20 @@ struct DashboardView: View {
     func loadData() {
         loading = true
         DispatchQueue.global(qos: .utility).async {
-            let dd = try? JSONDecoder().decode(DashboardData.self, from: Self.runScript("--daily-costs"))
+            let dailyData = Self.runScript("--daily-costs")
+            let dd = try? JSONDecoder().decode(DashboardData.self, from: dailyData)
             let rd = try? JSONDecoder().decode([String: RangeItem].self, from: Self.runScript("--ranges"))
             let wd = try? JSONDecoder().decode(WrappedData.self, from: Self.runScript("--wrapped"))
+            var dbg = "DashboardView loadData:\n"
+            if dd == nil {
+                dbg += "  --daily-costs decode FAILED, raw=\(String(data: dailyData.prefix(300), encoding: .utf8) ?? "nil")\n"
+            } else {
+                dbg += "  daily: \(dd!.daily.count), models: \(dd!.models.count)\n"
+            }
+            dbg += "  ranges: \(rd != nil ? "\(rd!.count) keys" : "FAILED")\n"
+            dbg += "  wrapped: \(wd != nil ? "ok" : "nil")\n"
+            let dbgPath = NSTemporaryDirectory() + "tokei_dashboard_debug.txt"
+            try? dbg.write(toFile: dbgPath, atomically: true, encoding: .utf8)
             DispatchQueue.main.async {
                 daily = dd?.daily ?? []
                 models = dd?.models ?? []
