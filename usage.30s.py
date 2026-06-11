@@ -257,13 +257,45 @@ _SCAN_CACHE_FILE = os.path.join(_tempfile.gettempdir(), "_tokei_scan_cache.json"
 _SCAN_CACHE_VERSION = 4
 
 
+def _sets_to_lists(obj):
+    """Recursively convert all sets to sorted lists for JSON serialization."""
+    if isinstance(obj, set):
+        return sorted(obj)
+    if isinstance(obj, dict):
+        return {k: _sets_to_lists(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sets_to_lists(item) for item in obj]
+    return obj
+
+
+def _lists_to_sets_in_db_days(obj):
+    """Restore sessions lists back to sets in _db_days entries."""
+    if isinstance(obj, dict):
+        result = {}
+        for k, v in obj.items():
+            if k == "_db_days" and isinstance(v, dict):
+                restored = {}
+                for dk, day in v.items():
+                    if isinstance(day, dict) and "sessions" in day:
+                        day = dict(day)
+                        day["sessions"] = set(day["sessions"]) if isinstance(day["sessions"], list) else day["sessions"]
+                    restored[dk] = _lists_to_sets_in_db_days(day)
+                result[k] = restored
+            else:
+                result[k] = _lists_to_sets_in_db_days(v)
+        return result
+    if isinstance(obj, list):
+        return [_lists_to_sets_in_db_days(item) for item in obj]
+    return obj
+
+
 def _load_scan_cache():
     try:
         with open(_SCAN_CACHE_FILE, "r") as f:
             c = json.load(f)
         if c.get("v") != _SCAN_CACHE_VERSION:
             return {"v": _SCAN_CACHE_VERSION}
-        return c
+        return _lists_to_sets_in_db_days(c)
     except Exception:
         return {"v": _SCAN_CACHE_VERSION}
 
@@ -271,8 +303,9 @@ def _load_scan_cache():
 def _save_scan_cache(cache):
     cache["v"] = _SCAN_CACHE_VERSION
     try:
+        serializable = _sets_to_lists(cache)
         with open(_SCAN_CACHE_FILE, "w") as f:
-            json.dump(cache, f, separators=(',', ':'))
+            json.dump(serializable, f, separators=(',', ':'))
     except Exception:
         pass
 
