@@ -936,6 +936,8 @@ def scan_hermes(bounds, cache):
     today_d = bounds["today"].date()
     yest_d = bounds["yesterday"].date()
     week_d = bounds["week"].date()
+    lw_start_d = bounds["last_week"].date()
+    lw_end_d = bounds["last_week_end"].date()
     month_d = bounds["month"].date()
     year_d = bounds["year"].date()
 
@@ -950,6 +952,7 @@ def scan_hermes(bounds, cache):
         if d == today_d: ks.append("today")
         if d == yest_d: ks.append("yesterday")
         if d >= week_d: ks.append("week")
+        if lw_start_d <= d < lw_end_d: ks.append("last_week")
         if d >= month_d: ks.append("month")
         if d >= year_d: ks.append("year")
         for k in ks:
@@ -1130,6 +1133,8 @@ def scan_opencode(bounds, cache):
     today_d = bounds["today"].date()
     yest_d = bounds["yesterday"].date()
     week_d = bounds["week"].date()
+    lw_start_d = bounds["last_week"].date()
+    lw_end_d = bounds["last_week_end"].date()
     month_d = bounds["month"].date()
     year_d = bounds["year"].date()
 
@@ -1184,6 +1189,7 @@ def scan_opencode(bounds, cache):
             if dd == today_d: ks.append("today")
             if dd == yest_d: ks.append("yesterday")
             if dd >= week_d: ks.append("week")
+            if lw_start_d <= dd < lw_end_d: ks.append("last_week")
             if dd >= month_d: ks.append("month")
             if dd >= year_d: ks.append("year")
             for k in ks:
@@ -1491,13 +1497,14 @@ def main():
     cx_hit = xt["hit"]
     p5, pw, r5, rw = x["p5"], x["pw"], x["r5"], x["rw"]
 
-    # ---- menu bar 标题(紧凑):⚡Claude命中率  ◷Codex周额度 ----
-    parts = [f"⚡{cc_hit:.0f}"]
-    if p5 is not None:
-        parts.append(f"◷{p5:.0f}")
-    elif pw is not None:
-        parts.append(f"◷{pw:.0f}")
-    print(" ".join(parts))
+    # ---- menu bar 标题(紧凑):今日 token 总量 ----
+    gt = d["gemini"]["ranges"]["today"]
+    gk_t = d["grok"]["ranges"]["today"]
+    today_total = (ct["in"] + ct["out"] + ct["cr"] + ct["cw"]
+                   + xt["in"] + xt["cached"] + xt["out"] + xt.get("reason", 0)
+                   + gt["in"] + gt["out"] + gt["cached"] + gt.get("thoughts", 0)
+                   + gk_t["tokens"])
+    print(f"⚡{human(today_total)}")
     print("---")
 
     F = "| font=Menlo size=14"
@@ -1721,7 +1728,8 @@ def update_unknown():
 
 
 def daily_costs():
-    """输出按天+按模型的成本 JSON(从扫描缓存读,无额外 I/O)。"""
+    """输出按天+按模型的成本 JSON(先刷新扫描缓存,确保与面板数据一致)。"""
+    compute()
     cache = _load_scan_cache()
     days = {}
     models = {}
@@ -2160,6 +2168,76 @@ def _detect_local_servers(project_paths):
         return {}
 
 
+def ranges_data():
+    """输出六个时间区间的汇总数据(供数据面板使用)。"""
+    compute()
+    cache = _load_scan_cache()
+    result = {}
+    for k in RANGE_KEYS:
+        ct = cc = cx = gf = gk = hm = oc = od = 0
+        cost = 0.0
+        for f, entry in cache.get("claude", {}).items():
+            if not isinstance(entry, dict): continue
+            for dk, day in entry.get("days", {}).items():
+                d = date.fromisoformat(dk)
+                if _in_range(d, k):
+                    t = day["in"] + day["out"] + day["cr"] + day["cw"]
+                    ct += t; cost += day.get("cost", 0)
+        for f, entry in cache.get("codex", {}).items():
+            if not isinstance(entry, dict): continue
+            for dk, day in entry.get("days", {}).items():
+                d = date.fromisoformat(dk)
+                if _in_range(d, k):
+                    cx += day["in"] + day["cached"] + day["out"] + day.get("reason", 0)
+                    cost += day.get("cost", 0)
+        for f, entry in cache.get("gemini", {}).items():
+            if not isinstance(entry, dict): continue
+            for dk, day in entry.get("days", {}).items():
+                d = date.fromisoformat(dk)
+                if _in_range(d, k):
+                    gf += day["in"] + day["out"] + day["cached"] + day.get("thoughts", 0)
+                    cost += day.get("cost", 0)
+        for f, entry in cache.get("hermes", {}).items():
+            if not isinstance(entry, dict): continue
+            for dk, day in entry.get("days", {}).items():
+                d = date.fromisoformat(dk)
+                if _in_range(d, k):
+                    hm += day["in"] + day["out"] + day["cr"] + day["cw"] + day.get("reason", 0)
+                    cost += day.get("cost", 0)
+        for f, entry in cache.get("openclaw", {}).items():
+            if not isinstance(entry, dict): continue
+            for dk, day in entry.get("days", {}).items():
+                d = date.fromisoformat(dk)
+                if _in_range(d, k):
+                    oc += day["in"] + day["out"] + day["cr"] + day["cw"]
+                    cost += day.get("cost", 0)
+        for f, entry in cache.get("opencode", {}).items():
+            if not isinstance(entry, dict): continue
+            for dk, day in entry.get("days", {}).items():
+                d = date.fromisoformat(dk)
+                if _in_range(d, k):
+                    od += day["in"] + day["out"] + day["cr"] + day["cw"] + day.get("reason", 0)
+                    cost += day.get("cost", 0)
+        result[k] = {"tokens": ct + cx + gf + gk + hm + oc + od,
+                     "cost": round(cost, 2),
+                     "claude": ct, "codex": cx, "gemini": gf,
+                     "grok": gk, "hermes": hm, "openclaw": oc, "opencode": od}
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def _in_range(d, k):
+    today = date.today()
+    if k == "today":     return d == today
+    if k == "yesterday": return d == today - timedelta(days=1)
+    if k == "week":      return d >= today - timedelta(days=today.weekday())
+    if k == "last_week":
+        week_start = today - timedelta(days=today.weekday())
+        return week_start - timedelta(days=7) <= d < week_start
+    if k == "month":     return d >= today.replace(day=1)
+    if k == "year":      return d >= today.replace(month=1, day=1)
+    return False
+
+
 if __name__ == "__main__":
     if "--update-prices" in sys.argv:
         sys.exit(update_prices())
@@ -2167,6 +2245,8 @@ if __name__ == "__main__":
         sys.exit(update_unknown())
     if "--daily-costs" in sys.argv:
         daily_costs()
+    elif "--ranges" in sys.argv:
+        ranges_data()
     elif "--projects" in sys.argv:
         projects()
     elif "--wrapped" in sys.argv:
