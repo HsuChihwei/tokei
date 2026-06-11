@@ -34,12 +34,26 @@ struct ModelCost: Codable, Identifiable {
 struct DashboardData: Codable {
     var daily: [DailyCost]
     var models: [ModelCost]
+    var ranges: [String: RangeItem] = [:]
+}
+
+struct RangeItem: Codable {
+    var tokens: Int = 0
+    var cost: Double = 0
+    var claude: Int = 0
+    var codex: Int = 0
+    var gemini: Int = 0
+    var grok: Int = 0
+    var hermes: Int = 0
+    var openclaw: Int = 0
+    var opencode: Int = 0
 }
 
 struct DashboardView: View {
     @State private var daily: [DailyCost] = []
     @State private var models: [ModelCost] = []
     @State private var wrapped: WrappedData? = nil
+    @State private var ranges: [String: RangeItem] = [:]
     @State private var loading = true
     @AppStorage("hideProjects") private var hideProjects = false
 
@@ -51,6 +65,8 @@ struct DashboardView: View {
             } else {
                 if let w = wrapped, w.total_tokens > 0 { WrappedView(data: w) }
                 if !daily.isEmpty {
+                    Divider().opacity(0.15)
+                    rangesSection
                     Divider().opacity(0.15)
                     modelSection
                     if let w = wrapped, !w.projects.isEmpty {
@@ -65,7 +81,48 @@ struct DashboardView: View {
         .onAppear { loadData() }
     }
 
-    // MARK: - Summary
+    // MARK: - Ranges Summary
+
+    var rangeKeys: [(key: String, label: String)] {
+        [("today", "今日"), ("yesterday", "昨日"), ("week", "本周"),
+         ("last_week", "上周"), ("month", "本月"), ("year", "本年")]
+    }
+
+    var rangesSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("用量概览").font(.system(size: 13, weight: .bold))
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())],
+                      spacing: 8) {
+                ForEach(rangeKeys, id: \.key) { rk in
+                    let r = ranges[rk.key] ?? RangeItem()
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(rk.label)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Theme.tTertiary)
+                        Text(Fmt.human(r.tokens))
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
+                            .foregroundStyle(Theme.tPrimary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                        HStack(spacing: 2) {
+                            Text("$")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(Theme.tTertiary)
+                            Text(String(format: "%.2f", r.cost))
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Theme.tSecondary)
+                        }
+                    }
+                    .padding(9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.black.opacity(0.25))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(Theme.claude.opacity(0.15), lineWidth: 0.5)))
+                }
+            }
+        }
+    }
 
     // MARK: - Model Chart
 
@@ -361,10 +418,12 @@ struct DashboardView: View {
         loading = true
         DispatchQueue.global(qos: .utility).async {
             let dd = try? JSONDecoder().decode(DashboardData.self, from: Self.runScript("--daily-costs"))
+            let rd = try? JSONDecoder().decode([String: RangeItem].self, from: Self.runScript("--ranges"))
             let wd = try? JSONDecoder().decode(WrappedData.self, from: Self.runScript("--wrapped"))
             DispatchQueue.main.async {
                 daily = dd?.daily ?? []
                 models = dd?.models ?? []
+                ranges = rd ?? [:]
                 wrapped = wd
                 loading = false
             }
