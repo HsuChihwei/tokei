@@ -113,22 +113,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let s = NSMutableAttributedString()
         let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
 
-        // 一格 = 时钟图标 + 5h 剩余%,按家族品牌色着色(橙=Claude 青=Codex)。
-        func seg(_ value: String, _ color: NSColor) {
-            if s.length > 0 {
-                s.append(NSAttributedString(string: "  ", attributes: [.font: font]))
-            }
-            let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
-                .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-            let img = NSImage(systemSymbolName: "clock.fill", accessibilityDescription: nil)?
-                .withSymbolConfiguration(cfg)
-            img?.isTemplate = false
-            let att = NSTextAttachment(); att.image = img
-            s.append(NSAttributedString(attachment: att))
-            s.append(NSAttributedString(string: " " + value,
-                attributes: [.font: font, .baselineOffset: 1, .foregroundColor: color]))
-        }
-
         if store.keepAwake.active {
             let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
                 .applying(NSImage.SymbolConfiguration(paletteColors: [Self.claudeColor]))
@@ -140,11 +124,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let u = store.usage {
-            if let q5 = u.claude.q5 { seg(String(format: "%.0f", 100 - q5), Self.claudeColor) }
-            if let p5 = u.codex.p5 { seg(String(format: "%.0f", 100 - p5), Self.codexColor) }
-            if s.length == 0 { seg("—", .secondaryLabelColor) }   // 两家额度都暂缺
+            let ct = u.claude.ranges.today
+            let xt = u.codex.ranges.today
+            let gt = u.gemini.ranges.today
+            let total = ct.in + ct.out + ct.cr + ct.cw
+                        + xt.in + xt.cached + xt.out + xt.reason
+                        + gt.in + gt.out + gt.cached + gt.thoughts
+            let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [Self.claudeColor]))
+            let img = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil)?
+                .withSymbolConfiguration(cfg)
+            img?.isTemplate = false
+            let att = NSTextAttachment(); att.image = img
+            s.append(NSAttributedString(attachment: att))
+            s.append(NSAttributedString(string: " " + Fmt.human(total),
+                attributes: [.font: font, .baselineOffset: 1, .foregroundColor: Self.claudeColor]))
         } else {
-            seg("…", .secondaryLabelColor)                        // 加载中
+            s.append(NSAttributedString(string: "…",
+                attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor]))
         }
         b.attributedTitle = s
         b.image = nil
