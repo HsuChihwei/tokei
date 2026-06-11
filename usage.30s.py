@@ -1826,6 +1826,9 @@ def update_unknown():
 def daily_costs():
     """输出按天+按模型的成本 JSON(从扫描缓存读,无额外 I/O)。"""
     cache = _load_scan_cache()
+    if not cache.get("claude"):
+        compute()
+        cache = _load_scan_cache()
     days = {}
     models = {}
 
