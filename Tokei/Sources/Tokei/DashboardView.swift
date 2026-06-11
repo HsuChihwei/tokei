@@ -55,6 +55,7 @@ struct DashboardView: View {
     @State private var wrapped: WrappedData? = nil
     @State private var ranges: [String: RangeItem] = [:]
     @State private var loading = true
+    @State private var chartDays = 14
     @AppStorage("hideProjects") private var hideProjects = false
 
     var body: some View {
@@ -68,7 +69,11 @@ struct DashboardView: View {
                     Divider().opacity(0.15)
                     rangesSection
                     Divider().opacity(0.15)
+                    dailyCostChart
+                    Divider().opacity(0.15)
                     modelSection
+                    Divider().opacity(0.15)
+                    toolShareSection
                     if let w = wrapped, !w.projects.isEmpty {
                         Divider().opacity(0.15)
                         projectsSection(w.projects)
@@ -124,6 +129,61 @@ struct DashboardView: View {
         }
     }
 
+    // MARK: - Daily Cost Chart
+
+    var dailyCostChart: some View {
+        let n = min(chartDays, daily.count)
+        let slice = Array(daily.suffix(n))
+        let maxCost = slice.map(\.total).max() ?? 1
+        return VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text("每日成本").font(.system(size: 13, weight: .bold))
+                Spacer()
+                Picker("", selection: $chartDays) {
+                    Text("14天").tag(14); Text("30天").tag(30)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 100)
+                .controlSize(.mini)
+            }
+            HStack(alignment: .bottom, spacing: 2) {
+                ForEach(slice) { d in
+                    VStack(spacing: 3) {
+                        let h = maxCost > 0 ? CGFloat(d.total / maxCost) * 68 : 0
+                        ZStack(alignment: .bottom) {
+                            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                .fill(Theme.codex.opacity(0.55))
+                                .frame(width: 8, height: max(2, h))
+                            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                .fill(Theme.claude)
+                                .frame(width: 8,
+                                       height: maxCost > 0
+                                           ? max(0, CGFloat(d.claude / maxCost) * 68)
+                                           : 0)
+                        }
+                        .frame(height: 68, alignment: .bottom)
+                        .help("\(d.date)\nClaude: $\(String(format: "%.2f", d.claude))\nCodex: $\(String(format: "%.2f", d.codex))\nTotal: $\(String(format: "%.2f", d.total))")
+                        Text(String(d.date.suffix(2)))
+                            .font(.system(size: 7, design: .monospaced))
+                            .foregroundStyle(Theme.tTertiary)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 10) {
+                HStack(spacing: 4) {
+                    Circle().fill(Theme.claude).frame(width: 6, height: 6)
+                    Text("Claude").font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
+                }
+                HStack(spacing: 4) {
+                    Circle().fill(Theme.codex.opacity(0.55)).frame(width: 6, height: 6)
+                    Text("Codex").font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
+                }
+                Spacer()
+            }
+        }
+    }
+
     // MARK: - Model Chart
 
     var modelSection: some View {
@@ -137,6 +197,63 @@ struct DashboardView: View {
                         tokens: m.tokens ?? ((m.in ?? 0) + (m.out ?? 0)),
                         cost: m.cost, maxTokens: maxTokens,
                         tint: m.tool == "codex" ? Theme.codex : Theme.claude)
+            }
+        }
+    }
+
+    // MARK: - Tool Share
+
+    var toolShareSection: some View {
+        let yr = ranges["year"] ?? RangeItem()
+        let tools: [(name: String, tokens: Int, tint: Color)] = [
+            ("Claude", yr.claude, Theme.claude),
+            ("Codex", yr.codex, Theme.codex),
+            ("Gemini", yr.gemini, Theme.gemini),
+            ("Hermes", yr.hermes, Theme.hermes),
+            ("OpenClaw", yr.openclaw, Theme.openclaw),
+            ("OpenCode", yr.opencode, Theme.opencode),
+        ].filter { $0.tokens > 0 }.sorted { $0.tokens > $1.tokens }
+        let total = tools.map(\.tokens).reduce(0, +)
+        return VStack(alignment: .leading, spacing: 9) {
+            Text("工具占比").font(.system(size: 13, weight: .bold))
+            if tools.isEmpty {
+                Text("暂无数据")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.tTertiary)
+            } else {
+                HStack(spacing: 3) {
+                    GeometryReader { geo in
+                        HStack(spacing: 2) {
+                            ForEach(tools, id: \.name) { t in
+                                let pct = total > 0 ? CGFloat(t.tokens) / CGFloat(total) : 0
+                                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                    .fill(t.tint)
+                                    .frame(width: max(4, geo.size.width * pct - 2))
+                                    .help("\(t.name): \(String(format: "%.1f", Double(t.tokens) / Double(total) * 100))%")
+                            }
+                        }
+                    }
+                    .frame(height: 8)
+                }
+                VStack(spacing: 5) {
+                    ForEach(tools, id: \.name) { t in
+                        let pct = total > 0 ? Double(t.tokens) / Double(total) * 100 : 0
+                        HStack(spacing: 6) {
+                            Circle().fill(t.tint).frame(width: 7, height: 7)
+                            Text(t.name)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Theme.tPrimary)
+                            Spacer()
+                            Text(Fmt.human(t.tokens))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(Theme.tTertiary)
+                            Text(String(format: "%.1f%%", pct))
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(t.tint)
+                                .frame(width: 44, alignment: .trailing)
+                        }
+                    }
+                }
             }
         }
     }
